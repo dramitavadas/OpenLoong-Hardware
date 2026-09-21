@@ -1,0 +1,47 @@
+name: Inspect QingLoong Head Assembly
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths: [".github/workflows/inspect_head.yml"]
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 1, lfs: false}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - name: Download official head STEP via LFS batch API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          P="QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-07 Head Assembly.STEP"
+          OID=$(awk '/^oid sha256:/{sub("sha256:","",$2); print $2}' "$P")
+          SIZE=$(awk '/^size /{print $2}' "$P")
+          printf '{"operation":"download","transfers":["basic"],"objects":[{"oid":"%s","size":%s}]}' "$OID" "$SIZE" >/tmp/req.json
+          curl -fLsS -u "$GITHUB_ACTOR:$GH_TOKEN" -H "Accept: application/vnd.git-lfs+json" -H "Content-Type: application/vnd.git-lfs+json" --data-binary @/tmp/req.json "https://github.com/loongOpen/OpenLoong-Hardware.git/info/lfs/objects/batch" -o /tmp/resp.json
+          HREF=$(python - <<'PY'
+          import json
+          d=json.load(open('/tmp/resp.json'))
+          print(d['objects'][0]['actions']['download']['href'])
+          PY
+          )
+          curl -fL --retry 5 "$HREF" -o /tmp/head.STEP
+          ls -lh /tmp/head.STEP
+      - name: Install CadQuery
+        run: |
+          pip install "cadquery>=2.5,<2.7" "numpy<3"
+      - name: Inspect bounds
+        run: |
+          python - <<'PY'
+          import cadquery as cq, json, time
+          t=time.time(); sh=cq.importers.importStep('/tmp/head.STEP').val()
+          bb=sh.BoundingBox(); solids=list(sh.Solids())
+          print(json.dumps({
+            "load_sec":time.time()-t,
+            "solid_count":len(solids),
+            "bounds_mm":[[bb.xmin,bb.ymin,bb.zmin],[bb.xmax,bb.ymax,bb.zmax]],
+            "extents_mm":[bb.xlen,bb.ylen,bb.zlen]
+          },indent=2))
+          PY
