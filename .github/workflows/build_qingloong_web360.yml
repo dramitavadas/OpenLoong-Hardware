@@ -1,0 +1,37 @@
+name: Build QingLoong Web 360 GLB
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths: [".github/workflows/build_qingloong_web360.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 1, lfs: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: "24"}
+      - name: Download corrected complete CAD GLB
+        run: |
+          curl -L --fail --retry 6 -o full.glb "https://github.com/dramitavadas/OpenLoong-Hardware/releases/download/qingloong-cad-complete-360/QingLoong_V2.5_FullBody_CAD_Complete_360.glb"
+          ls -lh full.glb
+      - name: Install glTF Transform
+        run: npm install -g @gltf-transform/cli
+      - name: Simplify for smooth browser orbit
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          gltf-transform simplify full.glb QingLoong_V2.5_FullBody_CAD_Complete_360_Web.glb --ratio 0.22 --error 0.002
+          ls -lh QingLoong_V2.5_FullBody_CAD_Complete_360_Web.glb
+      - name: Publish web release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="qingloong-cad-complete-360"
+          gh release upload "$TAG" QingLoong_V2.5_FullBody_CAD_Complete_360_Web.glb --clobber
