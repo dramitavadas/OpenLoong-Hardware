@@ -1,0 +1,123 @@
+name: Build QingLoong CAD GLB FreeCAD fallback
+
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths:
+      - ".github/workflows/build_qingloong_freecad.yml"
+  workflow_dispatch:
+
+jobs:
+  build-freecad:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: false
+
+      - name: Download master archive
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 6 --retry-delay 5             -o QingLoong_Master.zip             "https://github.com/dramitavadas/OpenLoong-Hardware/releases/download/qingloong-master-step/QingLoong_Master.zip"
+          echo "1120363fe8491f502614fdf9b2ba21d94ff878e466f0da7d3ea77e7ebf41e904  QingLoong_Master.zip" | sha256sum -c -
+          mkdir cad_src
+          unzip -o QingLoong_Master.zip -d cad_src
+          find cad_src -type f -iname '*.STEP' -o -iname '*.step'
+
+      - name: Install FreeCAD
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y freecad
+          which FreeCADCmd || which freecadcmd || true
+
+      - name: Mesh master STEP with FreeCAD/OpenCascade
+        run: |
+          STEP="$(find cad_src -type f \( -iname '*.step' -o -iname '*.stp' \) | head -1)"
+          export STEP
+          cat > /tmp/qingloong_mesh.py <<'PY'
+          import os, sys, time
+          import FreeCAD as App
+          import Import, Part, MeshPart
+
+          step=os.environ["STEP"]
+          out="/tmp/QingLoong_CAD.stl"
+          print("Importing", step)
+          t=time.time()
+          doc=App.newDocument("QingLoong")
+          Import.insert(step, doc.Name)
+          doc.recompute()
+          print("Imported objects:", len(doc.Objects), "sec:", time.time()-t)
+          shapes=[]
+          for o in doc.Objects:
+              if hasattr(o,"Shape"):
+                  try:
+                      if not o.Shape.isNull():
+                          shapes.append(o.Shape)
+                  except:
+                      pass
+          if not shapes:
+              raise RuntimeError("No CAD shapes imported")
+          print("Shapes:", len(shapes))
+          compound=Part.makeCompound(shapes)
+          print("Compounded")
+          t=time.time()
+          mesh=MeshPart.meshFromShape(
+              Shape=compound,
+              LinearDeflection=0.7,
+              AngularDeflection=0.16,
+              Relative=False
+          )
+          print("Mesh points:", mesh.CountPoints, "facets:", mesh.CountFacets, "sec:", time.time()-t)
+          mesh.write(out)
+          print("Wrote", out, os.path.getsize(out))
+          PY
+          FreeCADCmd /tmp/qingloong_mesh.py
+
+      - name: Convert STL to GLB with PBR material
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install "trimesh>=4.4" "numpy<3"
+          mkdir -p dist
+          python3 - <<'PY'
+          import os, json, numpy as np, trimesh
+          from trimesh.visual.material import PBRMaterial
+          from trimesh.visual.texture import TextureVisuals
+          src="/tmp/QingLoong_CAD.stl"
+          out="dist/QingLoong_V2.5_FullBody_CAD_FreeCAD.glb"
+          m=trimesh.load(src, force="mesh", process=False)
+          m.apply_scale(0.001)
+          m.visual=TextureVisuals(material=PBRMaterial(
+              name="QingLoong_CAD",
+              baseColorFactor=[0.38,0.43,0.49,1.0],
+              metallicFactor=0.72,
+              roughnessFactor=0.28,
+              doubleSided=True
+          ))
+          R=np.array([[1,0,0,0],[0,0,1,0],[0,-1,0,0],[0,0,0,1]],float)
+          m.apply_transform(R)
+          b=m.bounds
+          c=(b[0]+b[1])/2
+          T=np.eye(4); T[0,3]=-c[0]; T[2,3]=-c[2]; T[1,3]=-b[0,1]
+          m.apply_transform(T)
+          with open(out,"wb") as f: f.write(m.export(file_type="glb"))
+          man={
+            "source":"official QingLoong V2.5 master assembly STEP via FreeCAD",
+            "vertices":len(m.vertices),
+            "faces":len(m.faces),
+            "extents_m":m.extents.tolist(),
+            "output_bytes":os.path.getsize(out),
+            "note":"Direct tessellation of the master STEP, not the URDF/STL simulation model."
+          }
+          json.dump(man,open("dist/QingLoong_V2.5_FullBody_CAD_FreeCAD_manifest.json","w"),indent=2)
+          print(json.dumps(man,indent=2))
+          PY
+
+      - name: Upload fallback CAD GLB
+        uses: actions/upload-artifact@v4
+        with:
+          name: QingLoong_V2.5_FullBody_CAD_FreeCAD
+          path: dist/*
+          compression-level: 0
+          retention-days: 30
