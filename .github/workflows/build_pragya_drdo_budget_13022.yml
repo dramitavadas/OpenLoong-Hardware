@@ -1,0 +1,271 @@
+name: Build Pragya DRDO Budget 1.3022 Crore PDF
+
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths:
+      - ".github/workflows/build_pragya_drdo_budget_13022.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PDF dependency
+        run: pip install reportlab
+
+      - name: Generate A4 DRDO budget PDF
+        run: |
+          cat > /tmp/build_budget.py <<'PY'
+          from reportlab.lib import colors
+          from reportlab.lib.pagesizes import A4
+          from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+          from reportlab.lib.units import mm
+          from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+          from reportlab.pdfbase import pdfmetrics
+          from reportlab.pdfbase.ttfonts import TTFont
+          from reportlab.lib.colors import HexColor
+          import os
+
+          OUT = "Pragya_Lab_DRDO_Budget_1.3022_Crore_September_2026.pdf"
+
+          regular="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+          bold="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+          pdfmetrics.registerFont(TTFont("Body", regular))
+          pdfmetrics.registerFont(TTFont("BodyBold", bold))
+
+          PURPLE=HexColor("#5B2C83")
+          PURPLE_DARK=HexColor("#3F1D5D")
+          LIGHT_PURPLE=HexColor("#F1EAF7")
+          LIGHT_GRAY=HexColor("#F5F6F8")
+          MID_GRAY=HexColor("#D8DCE3")
+          DARK=HexColor("#20242B")
+
+          PAGE_W,PAGE_H=A4
+          LEFT=RIGHT=12*mm
+          TOP=14*mm
+          BOTTOM=14*mm
+
+          doc=SimpleDocTemplate(
+              OUT,pagesize=A4,rightMargin=RIGHT,leftMargin=LEFT,
+              topMargin=TOP+8*mm,bottomMargin=BOTTOM+7*mm,
+              title="Pragya Lab - Detailed Budget Estimate for DRDO-Sponsored Research",
+              author="Pragya Lab, BITS Pilani Goa Campus"
+          )
+          styles=getSampleStyleSheet()
+          styles.add(ParagraphStyle(name="TitleP",fontName="BodyBold",fontSize=18,leading=22,textColor=PURPLE_DARK,spaceAfter=5*mm))
+          styles.add(ParagraphStyle(name="SubTitleP",fontName="Body",fontSize=10.5,leading=14,textColor=DARK,spaceAfter=4*mm))
+          styles.add(ParagraphStyle(name="H1P",fontName="BodyBold",fontSize=12.5,leading=16,textColor=PURPLE_DARK,spaceBefore=3*mm,spaceAfter=2.5*mm))
+          styles.add(ParagraphStyle(name="H2P",fontName="BodyBold",fontSize=10.5,leading=13,textColor=PURPLE,spaceBefore=2.5*mm,spaceAfter=2*mm))
+          styles.add(ParagraphStyle(name="BodyP",fontName="Body",fontSize=8.2,leading=11.3,textColor=DARK,spaceAfter=2.1*mm))
+          styles.add(ParagraphStyle(name="SmallP",fontName="Body",fontSize=7.0,leading=9.2,textColor=DARK))
+          styles.add(ParagraphStyle(name="SmallBoldP",fontName="BodyBold",fontSize=7.0,leading=9.2,textColor=DARK))
+          styles.add(ParagraphStyle(name="CenterSmallP",fontName="Body",fontSize=7.0,leading=9.0,alignment=1,textColor=DARK))
+          styles.add(ParagraphStyle(name="NoteP",fontName="Body",fontSize=7.2,leading=9.7,textColor=HexColor("#4B4F58"),spaceAfter=2*mm))
+          styles.add(ParagraphStyle(name="KPI",fontName="BodyBold",fontSize=11.0,leading=14,textColor=PURPLE_DARK,alignment=1))
+          styles.add(ParagraphStyle(name="KPISmall",fontName="Body",fontSize=7.0,leading=9.0,textColor=DARK,alignment=1))
+
+          def P(s,sty="BodyP"): return Paragraph(s,styles[sty])
+          def m(v): return f"{v:.2f}"
+
+          A=[
+          ("A1","Unitree R1 EDU","1",22.00,"Confirmed BQ","Research humanoid baseline for locomotion, whole-body control, reinforcement learning, VLA evaluation and sim-to-real experiments."),
+          ("A2","R1-compatible protective gantry / safety hanger","1",1.20,"Provision","Fall protection during locomotion, retargeting and controller-development experiments."),
+          ("A3","Additional R1 battery","1",0.60,"Provision","Reduces experimental downtime and supports longer robot-development sessions."),
+          ("A4","Asimov-1 DIY humanoid development platform","1",20.00,"Provision pending BQ","Open/customizable humanoid base for the Kalki embodiment, including mechanical, electrical and software integration."),
+          ("A5","OpenArm 2.0 bimanual manipulation system","1 system",7.00,"Provision pending BQ","Dedicated dual-arm platform for repeated manipulation, imitation learning and PragyaDex experiments."),
+          ("A6","Aero Hand Open - pair for OpenArm (L+R)","1 pair",2.00,"Provision","Five-finger dexterous end-effectors permanently assigned to the PragyaDex/OpenArm station."),
+          ("A7","Aero Hand Open - pair for Kalki (L+R)","1 pair",2.00,"Provision","Dedicated dexterous hands for Kalki, avoiding repeated transfer between platforms."),
+          ("A8","Rokoko Smartsuit Pro II - Glove Ready","1",2.60,"Provision pending BQ","Whole-body human motion capture for imitation learning and robot retargeting."),
+          ("A9","Rokoko Smartgloves II","1 pair",2.00,"Provision pending BQ","Finger articulation and hand-pose capture for dexterous teleoperation and demonstration collection."),
+          ("A10","Rokoko Coil Pro","1",2.90,"Provision pending BQ","Absolute spatial tracking of hand/root motion for Cartesian teleoperation and synchronized demonstrations."),
+          ("A11","XR teleoperation headset (Meta Quest 3 class)","1",0.75,"Provision","Operator visual interface for immersive teleoperation, robot-camera visualization and XR experiments."),
+          ("A12","NVIDIA DGX Spark 128 GB / 4 TB","2",12.20,"Indicative vendor price","Local low-latency VLM/VLA inference, simulation, model development, dataset processing and robot-side AI experimentation; two nodes support parallel or distributed work."),
+          ("A13","Huion Kamvas Pro 27 4K Touch","2",3.50,"Provision","Two large pen/touch engineering interfaces, one per Windows/Mac workstation, for shell design, mesh cleanup, CAD review and scan processing."),
+          ("A14","3Dconnexion SpaceMouse Wireless","2",0.50,"Provision","6-DOF navigation of large robot assemblies and complex CAD/3D scenes on both workstations."),
+          ("A15","Heavy-duty display / VESA mounting systems","2 sets",0.40,"Provision","Ergonomic and secure installation of the two 27-inch pen displays."),
+          ("A16","Creality CR-Scan Raptor Pro with scanning accessories","1",2.25,"Provision","Reverse engineering and dimensional capture of robot shells, interfaces, brackets and assembled geometry."),
+          ("A17","Bambu Lab H2C AMS Combo","1",3.37,"Indicative market price","Multi-material fabrication of Kalki shell components, fixtures, prototypes and robot integration parts."),
+          ("A18","Central NAS / research storage server","1",5.00,"Capacity provision","Central RAID-protected storage for RGB/RGB-D/video, motion capture, CAD, simulation, checkpoints and robot datasets, with high-speed networking."),
+          ("A19","Windows engineering workstation","1",3.75,"Provision","Dedicated SOLIDWORKS/CAD, scan-to-CAD, mechanical assembly and engineering workstation; separate from AI compute."),
+          ("A20","Mac Studio-class 3D visualization workstation","1",3.50,"Provision","Parallel 3D geometry/mesh processing, visualization, rendering, multimodal dataset preparation and software-development workloads.")
+          ]
+          B=[
+          ("B1","Engineering PETG / PETG-HF",0.30,"Large shell components, fit prototypes and functional covers."),
+          ("B2","PLA-CF",0.25,"Matte carbon-look external shell parts and rigid prototype components."),
+          ("B3","PETG-CF",0.25,"Tough functional covers and mechanical components."),
+          ("B4","PAHT-CF / PA-CF",0.30,"Higher-strength printed brackets and adapters where additive manufacture is appropriate."),
+          ("B5","TPU / flexible filament",0.18,"Flexible joint covers for neck, shoulders, wrists, waist, knees and ankles."),
+          ("B6","Metallic-effect filament",0.12,"Visual trim, logos and non-structural metallic-finish components."),
+          ("B7","Matte PLA / prototype filament",0.15,"Form/fit iterations before final engineering-material prints."),
+          ("B8","Support / interface materials",0.10,"Complex geometry, supports and interface printing."),
+          ("B9","Calibration, purge and iterative-print allowance",0.35,"Expected material consumption during tuning, failed prints and iterative full-body fabrication.")
+          ]
+          C=[
+          ("C1","Asimov spare actuators / motors / critical electronics",3.00,"Strategic replacement stock to reduce downtime from actuator/controller failure."),
+          ("C2","Asimov-to-Kalki conversion hardware",1.50,"Structural interfaces, wrist flanges, wiring, sensor mounts, inserts, connectors and integration hardware."),
+          ("C3","Rokoko Device SDK / robotics integration provision",1.00,"Programmatic motion/pose/timestamp access for ROS 2, retargeting and learning pipelines; final amount subject to research quote."),
+          ("C4","DGX high-speed interconnect / networking",0.20,"High-speed link and local integration networking for the two DGX Spark nodes."),
+          ("C5","DC-DC converters, fused supplies and E-stop hardware",0.20,"Safe power conversion and emergency-stop integration for custom robot subsystems."),
+          ("C6","CAN / USB / Ethernet adapters, hubs and cabling",0.15,"Robot-compute communication and sensor integration."),
+          ("C7","Wrist-camera brackets and calibration fixtures",0.15,"Repeatable visual sensing and manipulation-workcell calibration."),
+          ("C8","Mocap power banks and capture accessories",0.10,"Long-duration human-demonstration capture sessions."),
+          ("C9","Fasteners, connectors and miscellaneous integration stock",0.10,"Routine mechanical/electrical integration requirements.")
+          ]
+          D=[
+          ("D1","Advanced AI research-assistant subscriptions (GPT/Astra-class)","4 research seats x 6 months",3.50,"Robot/spatial reasoning, software development, CAD/code assistance, ROS debugging and research workflows."),
+          ("D2","On-demand GPU cloud compute credits (Vast.ai or equivalent approved provider)","Project reserve",5.00,"Burst access to high-end GPUs for training workloads that exceed local capacity."),
+          ("D3","SOLIDWORKS Research Edition","1 research licence provision",3.00,"Sponsored-research mechanical CAD licence for Kalki, robot assemblies, fixtures and engineering drawings; final cost subject to institutional quote.")
+          ]
+          E=[
+          ("E1","Asimov international freight / import / logistics",3.50,"Freight, insurance, customs handling, brokerage and landed-cost variation."),
+          ("E2","OpenArm freight / import / logistics",0.75,"International delivery and import-related variation."),
+          ("E3","Rokoko system freight / import / logistics",0.75,"International delivery of suit, gloves and Coil Pro.")
+          ]
+
+          TA=sum(x[3] for x in A); TB=sum(x[2] for x in B); TC=sum(x[2] for x in C); TD=sum(x[3] for x in D); TE=sum(x[2] for x in E)
+          TF=1.50; TG=5.00
+          direct=round(TA+TB+TC+TD+TE+TF+TG,2); oh=1.30; total=round(direct+oh,2)
+          assert (round(TA,2),round(TB,2),round(TC,2),round(TD,2),round(TE,2),direct,total)==(97.52,2.00,6.40,11.50,5.00,128.92,130.22)
+
+          buckets=[("A","Capital equipment / solid buys",TA),("B","Fabrication materials / expendables",TB),("C","Integration, accessories & spares",TC),("D","Software, AI & cloud compute",TD),("E","Freight, import & logistics",TE),("F","Contingency",TF),("G","Project travel",TG)]
+
+          def hf(canvas,doc):
+              canvas.saveState()
+              canvas.setStrokeColor(PURPLE); canvas.setLineWidth(.6); canvas.line(LEFT,PAGE_H-10*mm,PAGE_W-RIGHT,PAGE_H-10*mm)
+              canvas.setFont("Body",6.6); canvas.setFillColor(HexColor("#5B5F68"))
+              canvas.drawString(LEFT,PAGE_H-8.2*mm,"Pragya Lab | Detailed Budget Estimate for DRDO-Sponsored Research | September 2026")
+              canvas.drawString(LEFT,7.2*mm,"Budgetary estimate; final quotations, DRDO sanction terms and BITS Pilani approvals prevail.")
+              canvas.drawRightString(PAGE_W-RIGHT,7.2*mm,f"Page {doc.page}")
+              canvas.restoreState()
+
+          S=[]
+          S += [P("PRAGYA LAB","TitleP"),P("Robotics and Embodied AI Research Infrastructure","SubTitleP"),P("Detailed Budget Estimate for DRDO-Sponsored Research","H1P"),P("September 2026 | Draft for Budgetary Review","BodyP"),Spacer(1,2*mm)]
+          K=[
+              [P("Direct project cost","KPISmall"),P("Provisional institutional overhead*","KPISmall"),P("Total project budget","KPISmall")],
+              [P("₹128.92 lakh","KPI"),P("₹1.30 lakh","KPI"),P("₹130.22 lakh","KPI")],
+              [P("₹1.2892 crore","KPISmall"),P("20% of ₹6.50 L planning base","KPISmall"),P("₹1.3022 crore","KPI")]
+          ]
+          kt=Table(K,colWidths=[57*mm]*3,rowHeights=[9*mm,11*mm,9*mm])
+          kt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),LIGHT_PURPLE),("BOX",(0,0),(-1,-1),.7,PURPLE),("INNERGRID",(0,0),(-1,-1),.35,MID_GRAY),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
+          S += [kt,Spacer(1,4*mm),P("<b>*Overhead note:</b> For this budgetary estimate, a provisional 20% institutional-overhead provision is shown on the current planning base of project travel (₹5.00 lakh) plus contingency (₹1.50 lakh). The final admissible overhead rate and calculation basis shall be governed by the applicable DRDO sanction/scheme and confirmed by BITS Pilani GCIR/Finance.","NoteP")]
+          S += [P("1. Scope and budgeting approach","H1P"),P("The proposed infrastructure supports humanoid robotics, dexterous manipulation, human-to-robot skill transfer, robot design/fabrication, embodied-AI model development, simulation, local and cloud compute, and experimental evaluation. Costs are separated into capital equipment, fabrication materials, integration/spares, software and cloud services, freight/import logistics, contingency and project travel. All figures are budgetary estimates unless supported by a current quotation. Final procurement will follow BITS Pilani procedures and the applicable DRDO sanction conditions.")]
+          S += [P("2. Budget summary by head","H1P")]
+          sd=[[P("Bucket","SmallBoldP"),P("Budget head","SmallBoldP"),P("Amount (₹ lakh)","SmallBoldP"),P("Share of direct cost","SmallBoldP")]]
+          for code,head,amt in buckets: sd.append([P(code,"CenterSmallP"),P(head,"SmallP"),P(m(amt),"CenterSmallP"),P(f"{100*amt/direct:.1f}%","CenterSmallP")])
+          sd += [[P("","SmallBoldP"),P("DIRECT PROJECT COST","SmallBoldP"),P(m(direct),"CenterSmallP"),P("100.0%","CenterSmallP")],
+                 [P("","SmallBoldP"),P("Provisional institutional overhead","SmallBoldP"),P(m(oh),"CenterSmallP"),P("-","CenterSmallP")],
+                 [P("","SmallBoldP"),P("TOTAL PROJECT BUDGET","SmallBoldP"),P(m(total),"CenterSmallP"),P("₹1.3022 crore","CenterSmallP")]]
+          t=Table(sd,colWidths=[14*mm,92*mm,32*mm,36*mm],repeatRows=1)
+          t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),PURPLE_DARK),("TEXTCOLOR",(0,0),(-1,0),colors.white),("BACKGROUND",(0,-1),(-1,-1),LIGHT_PURPLE),("BOX",(0,0),(-1,-1),.5,MID_GRAY),("INNERGRID",(0,0),(-1,-1),.25,MID_GRAY),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),4),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+          S.append(t)
+          S.append(P("Scope covered","H2P"))
+          scope=[
+            "Commercial humanoid baseline (Unitree R1 EDU) with safety gantry and spare battery.",
+            "Open/custom humanoid platform (Asimov-1) converted into Kalki, with dedicated Aero hands and strategic actuator/electronics spares.",
+            "Dedicated PragyaDex bimanual manipulation station (OpenArm 2.0 + Aero Hand Open).",
+            "Human demonstration stack (Rokoko Smartsuit Pro II + Smartgloves II + Coil Pro + Quest 3).",
+            "Local AI compute (2 x DGX Spark), cloud GPU reserve, central NAS, Windows engineering workstation and Mac Studio-class 3D workstation.",
+            "Two 27-inch pen/touch design displays with two SpaceMouse units and two heavy-duty mounts, one design interface per workstation.",
+            "Reverse engineering and fabrication (Raptor Pro scanner, Bambu H2C AMS Combo, engineering/carbon-fibre/flexible/metallic-effect filament stock).",
+            "SOLIDWORKS Research Edition, GPT/Astra-class research access, project travel, logistics and contingency."
+          ]
+          for b in scope:S.append(P("• "+b,"BodyP"))
+
+          S.append(PageBreak())
+          S += [P(f"A. Capital Equipment / Solid Buys - ₹{TA:.2f} lakh","H1P"),P("Capital items are listed with concise technical justification. Items shown as provisions require current institutional/vendor quotations before purchase. The two 27-inch pen-display stations are intentionally paired with the separate Windows and Mac engineering workstations.")]
+          ad=[[P("ID","SmallBoldP"),P("Item / specification","SmallBoldP"),P("Qty.","SmallBoldP"),P("Budget<br/>(₹ L)","SmallBoldP"),P("Cost basis / technical justification","SmallBoldP")]]
+          for i,item,q,amt,basis,just in A:ad.append([P(i,"CenterSmallP"),P(item,"SmallP"),P(q,"CenterSmallP"),P(m(amt),"CenterSmallP"),P(f"<b>{basis}.</b> {just}","SmallP")])
+          at=Table(ad,colWidths=[10*mm,49*mm,18*mm,20*mm,76*mm],repeatRows=1,splitByRow=1)
+          at.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),PURPLE_DARK),("TEXTCOLOR",(0,0),(-1,0),colors.white),("BOX",(0,0),(-1,-1),.5,MID_GRAY),("INNERGRID",(0,0),(-1,-1),.22,MID_GRAY),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3)]))
+          S.append(at)
+
+          S.append(PageBreak())
+          S += [P(f"B. Fabrication Materials / Expendables - ₹{TB:.2f} lakh","H1P")]
+          bd=[[P("ID","SmallBoldP"),P("Material / expendable","SmallBoldP"),P("Budget (₹ L)","SmallBoldP"),P("Technical use","SmallBoldP")]]
+          for i,item,amt,just in B:bd.append([P(i,"CenterSmallP"),P(item,"SmallP"),P(m(amt),"CenterSmallP"),P(just,"SmallP")])
+          bt=Table(bd,colWidths=[12*mm,57*mm,28*mm,76*mm],repeatRows=1)
+          bt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),PURPLE_DARK),("TEXTCOLOR",(0,0),(-1,0),colors.white),("BOX",(0,0),(-1,-1),.5,MID_GRAY),("INNERGRID",(0,0),(-1,-1),.22,MID_GRAY),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3)]))
+          S += [bt,Spacer(1,3*mm),P(f"C. Integration, Accessories & Spares - ₹{TC:.2f} lakh","H1P")]
+          cd=[[P("ID","SmallBoldP"),P("Item","SmallBoldP"),P("Budget (₹ L)","SmallBoldP"),P("Justification","SmallBoldP")]]
+          for i,item,amt,just in C:cd.append([P(i,"CenterSmallP"),P(item,"SmallP"),P(m(amt),"CenterSmallP"),P(just,"SmallP")])
+          ct=Table(cd,colWidths=[12*mm,61*mm,28*mm,72*mm],repeatRows=1)
+          ct.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),PURPLE_DARK),("TEXTCOLOR",(0,0),(-1,0),colors.white),("BOX",(0,0),(-1,-1),.5,MID_GRAY),("INNERGRID",(0,0),(-1,-1),.22,MID_GRAY),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3)]))
+          S.append(ct)
+
+          S.append(PageBreak())
+          S += [P(f"D. Software, AI & Cloud Compute - ₹{TD:.2f} lakh","H1P")]
+          dd=[[P("ID","SmallBoldP"),P("Item","SmallBoldP"),P("Qty. / duration","SmallBoldP"),P("Budget (₹ L)","SmallBoldP"),P("Research justification","SmallBoldP")]]
+          for i,item,q,amt,just in D:dd.append([P(i,"CenterSmallP"),P(item,"SmallP"),P(q,"SmallP"),P(m(amt),"CenterSmallP"),P(just,"SmallP")])
+          dt=Table(dd,colWidths=[11*mm,49*mm,32*mm,23*mm,58*mm],repeatRows=1)
+          dt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),PURPLE_DARK),("TEXTCOLOR",(0,0),(-1,0),colors.white),("BOX",(0,0),(-1,-1),.5,MID_GRAY),("INNERGRID",(0,0),(-1,-1),.22,MID_GRAY),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3)]))
+          S += [dt,Spacer(1,3*mm),P(f"E. Freight, Import & Logistics - ₹{TE:.2f} lakh","H1P")]
+          ed=[[P("ID","SmallBoldP"),P("System","SmallBoldP"),P("Budget (₹ L)","SmallBoldP"),P("Coverage","SmallBoldP")]]
+          for i,item,amt,just in E:ed.append([P(i,"CenterSmallP"),P(item,"SmallP"),P(m(amt),"CenterSmallP"),P(just,"SmallP")])
+          et=Table(ed,colWidths=[12*mm,62*mm,28*mm,71*mm],repeatRows=1)
+          et.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),PURPLE_DARK),("TEXTCOLOR",(0,0),(-1,0),colors.white),("BOX",(0,0),(-1,-1),.5,MID_GRAY),("INNERGRID",(0,0),(-1,-1),.22,MID_GRAY),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3)]))
+          S += [et,P("F. Contingency - ₹1.50 lakh","H1P"),P("Restricted to admissible minor operational/administrative or genuinely unforeseen project expenditure under the applicable DRDO contingency head. Planned technical purchases, spares, fabrication materials and import/logistics are budgeted separately under the appropriate heads."),P("G. Project Travel - ₹5.00 lakh","H1P"),P("Project-linked travel for DRDO/project review meetings, field trials, collaborator and technical visits, supplier/integration visits, demonstrations and other eligible research travel, subject to the applicable DRDO sanction and institutional travel rules.")]
+
+          S.append(PageBreak())
+          S += [P("3. Final budget reconciliation","H1P")]
+          rd=[[P("Budget head","SmallBoldP"),P("Amount (₹ lakh)","SmallBoldP"),P("Remarks","SmallBoldP")]]
+          for code,head,amt in buckets:rd.append([P(f"{code} - {head}","SmallP"),P(m(amt),"CenterSmallP"),P("Direct project expenditure","SmallP")])
+          rd += [[P("DIRECT PROJECT COST","SmallBoldP"),P(m(direct),"CenterSmallP"),P("A + B + C + D + E + F + G","SmallP")],
+                 [P("Provisional overhead calculation base*","SmallBoldP"),P("6.50","CenterSmallP"),P("Current planning base: Travel ₹5.00 L + Contingency ₹1.50 L","SmallP")],
+                 [P("Provisional institutional overhead @ 20%*","SmallBoldP"),P(m(oh),"CenterSmallP"),P("To be confirmed by BITS Pilani GCIR/Finance and applicable DRDO sanction/scheme","SmallP")],
+                 [P("TOTAL PROJECT BUDGET","SmallBoldP"),P(m(total),"CenterSmallP"),P("₹1.3022 crore","SmallBoldP")]]
+          rt=Table(rd,colWidths=[82*mm,32*mm,59*mm],repeatRows=1)
+          rt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),PURPLE_DARK),("TEXTCOLOR",(0,0),(-1,0),colors.white),("BACKGROUND",(0,-1),(-1,-1),LIGHT_PURPLE),("BOX",(0,0),(-1,-1),.5,MID_GRAY),("INNERGRID",(0,0),(-1,-1),.22,MID_GRAY),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+          S += [rt,Spacer(1,3*mm),P("*The overhead figure is intentionally provisional. The final admissible rate and calculation base will follow the specific DRDO sanction and BITS Pilani approval.","NoteP")]
+          S += [P("4. Budget controls and DRDO-facing notes","H1P")]
+          notes=[
+          "No project manpower / salary head is included in this budget.",
+          "Unitree R1 EDU is retained at ₹22.00 lakh based on the confirmed budgetary quotation; the PO should explicitly state the EDU configuration, secondary-development access, exact DOF configuration, battery configuration and gantry compatibility.",
+          "Asimov-1, OpenArm 2.0, Rokoko hardware/SDK, SOLIDWORKS and other provisioned items should be procured only after current institutional/vendor quotations clarify taxes, freight, licence terms, warranty and support.",
+          "The two Aero Hand pairs are assigned separately: one permanent pair for OpenArm/PragyaDex and one permanent pair for Asimov/Kalki.",
+          "The Windows engineering workstation is dedicated to SOLIDWORKS, scan-to-CAD and mechanical engineering. The Mac Studio-class workstation is dedicated to 3D geometry/mesh processing, visualization, rendering and software development. Each workstation has its own 27-inch pen display, SpaceMouse and heavy-duty mount.",
+          "The two DGX Spark systems are justified as local low-latency embodied-AI compute for robot development, inference, simulation and dataset processing. Cloud GPU credits are reserved for burst training beyond local capacity.",
+          "The NAS is a research-data infrastructure item; the final BQ should specify usable capacity, RAID protection, high-speed networking, warranty and backup strategy.",
+          "Freight/import/logistics is separated from contingency. Contingency is not used as a hidden provision for planned imports, spares or fabrication.",
+          "All DRDO-funded assets will be recorded, marked and managed in accordance with applicable DRDO asset/retention rules and BITS Pilani procedures."
+          ]
+          for n in notes:S.append(P("• "+n,"BodyP"))
+          S += [P("5. Proposed procurement sequence","H1P")]
+          seq=[
+          "Finalize budgetary quotations for R1 EDU, Asimov-1, OpenArm 2.0, Rokoko bundle/SDK, DGX Spark, SOLIDWORKS Research Edition, NAS and the safety gantry.",
+          "Procure core platforms and compute: R1, Asimov, OpenArm, Aero pairs, Rokoko stack, DGX Sparks, storage and engineering workstations.",
+          "Commission the two design stations and fabrication workflow: Huion displays + SpaceMouse units + mounts, Raptor Pro scanner, Bambu H2C and initial engineering-material inventory.",
+          "Commission integration items, spares, power/E-stop architecture and network links after physical interfaces are verified.",
+          "Activate GPT/Astra-class research subscriptions and cloud GPU credits in alignment with active project milestones to avoid unused subscription periods."
+          ]
+          for i,s in enumerate(seq,1):S.append(P(f"<b>{i}.</b> {s}","BodyP"))
+          S += [P("6. Budget status","H1P"),P("This document is intended as a detailed budget estimate for DRDO budgetary discussion. It is not a purchase order. Vendor/model substitutions, final quantities, taxes, duties and admissible overhead will be updated against approved budgetary quotations and final sanction terms without changing the technical objectives of the project.")]
+
+          doc.build(S,onFirstPage=hf,onLaterPages=hf)
+          print("Created",OUT,os.path.getsize(OUT))
+          PY
+          python /tmp/build_budget.py
+          ls -lh Pragya_Lab_DRDO_Budget_1.3022_Crore_September_2026.pdf
+
+      - name: Publish PDF release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="pragya-drdo-budget-13022"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG"               --title "Pragya Lab DRDO Budget - ₹1.3022 Crore"               --notes "A4 detailed budget estimate for DRDO-sponsored robotics and embodied-AI research infrastructure. Direct project cost ₹128.92 lakh + provisional institutional overhead ₹1.30 lakh = ₹130.22 lakh (₹1.3022 crore)."
+          fi
+          gh release upload "$TAG" Pragya_Lab_DRDO_Budget_1.3022_Crore_September_2026.pdf --clobber
