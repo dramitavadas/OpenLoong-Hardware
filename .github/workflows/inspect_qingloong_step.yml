@@ -1,0 +1,35 @@
+name: Inspect QingLoong STEP encoding
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths: [".github/workflows/inspect_qingloong_step.yml"]
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 1, lfs: false}
+      - name: Download and inspect
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 4 -o q.zip "https://github.com/dramitavadas/OpenLoong-Hardware/releases/download/qingloong-master-step/QingLoong_Master.zip"
+          mkdir q && unzip -o q.zip -d q
+          STEP="$(find q -type f \( -iname '*.step' -o -iname '*.stp' \) | head -1)"
+          ls -lh "$STEP"
+          {
+            echo "FILE=$STEP"
+            echo "SIZE=$(stat -c%s "$STEP")"
+            echo "TRIANGULATED_FACE_SET=$(grep -a -c 'TRIANGULATED_FACE_SET' "$STEP" || true)"
+            echo "TESSELLATED=$(grep -a -c 'TESSELLATED' "$STEP" || true)"
+            echo "FACETED_BREP=$(grep -a -c 'FACETED_BREP' "$STEP" || true)"
+            echo "MANIFOLD_SOLID_BREP=$(grep -a -c 'MANIFOLD_SOLID_BREP' "$STEP" || true)"
+            echo "ADVANCED_FACE=$(grep -a -c 'ADVANCED_FACE' "$STEP" || true)"
+            echo "--- first tessellation-ish lines ---"
+            grep -a -m 10 -E 'TRIANGULATED_FACE_SET|TESSELLATED|FACETED_BREP' "$STEP" || true
+          } | tee inspect.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QingLoong_STEP_inspect
+          path: inspect.txt
