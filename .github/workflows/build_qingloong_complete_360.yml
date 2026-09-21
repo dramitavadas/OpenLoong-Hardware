@@ -1,0 +1,155 @@
+name: Build QingLoong Complete 360 GLB
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths: [".github/workflows/build_qingloong_complete_360.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 1, lfs: false}
+
+      - name: Checkout official QingLoong URDF head meshes
+        uses: actions/checkout@v4
+        with:
+          repository: Kscii/h5_tf_exporter
+          ref: f4f680023ca6fbe33a3a644a302d7229a8fae785
+          path: h5src
+
+      - name: Download CAD body GLB
+        run: |
+          curl -L --fail --retry 6 -o body.glb "https://github.com/dramitavadas/OpenLoong-Hardware/releases/download/qingloong-cad-glb/QingLoong_V2.5_FullBody_CAD.glb"
+          ls -lh body.glb
+
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+
+      - name: Install GLB tools
+        run: |
+          pip install "trimesh==4.8.3" "numpy<3"
+
+      - name: Fix axes and add official QingLoong head
+        run: |
+          mkdir -p dist
+          python - <<'PY'
+          import os, json
+          import numpy as np
+          import trimesh
+          from trimesh.visual.material import PBRMaterial
+          from trimesh.visual.texture import TextureVisuals
+
+          body_path="body.glb"
+          root="h5src/packages/hpc_data_common_end/src/hpc_data_common_end/resources/QINGLOONGV2.5"
+          yaw_path=os.path.join(root,"meshes","Link_head_yaw.STL")
+          pitch_path=os.path.join(root,"meshes","Link_head_pitch.STL")
+          out="dist/QingLoong_V2.5_FullBody_CAD_Complete_360.glb"
+          man="dist/QingLoong_V2.5_FullBody_CAD_Complete_360_manifest.json"
+
+          print("Loading CAD body...")
+          scene=trimesh.load(body_path, force="scene", process=False)
+          print("body geometries",len(scene.geometry),"bounds",scene.bounds.tolist())
+
+          # The first CAD export incorrectly treated STEP Z as vertical.
+          # Actual QingLoong STEP axes are X=left/right, Y=vertical, Z=depth.
+          # Current file coordinates are (X, Z, -Y). Rotate +90 deg around X
+          # to restore Y-up for glTF/model-viewer.
+          axis_fix=np.array([
+              [1,0,0,0],
+              [0,0,-1,0],
+              [0,1,0,0],
+              [0,0,0,1]
+          ],dtype=float)
+          scene.apply_transform(axis_fix)
+
+          body_bounds=scene.bounds.copy()
+          print("axis-fixed body bounds",body_bounds.tolist(),"extents",(body_bounds[1]-body_bounds[0]).tolist())
+
+          # Official QingLoong V2.5 simulation head: yaw + pitch CAD-derived visual meshes.
+          yaw=trimesh.load(yaw_path, force="mesh", process=False)
+          pitch=trimesh.load(pitch_path, force="mesh", process=False)
+
+          # URDF joint transforms in metres.
+          Tyaw=np.eye(4); Tyaw[:3,3]=[0.009,0.0,0.4064]
+          Tpitch=np.eye(4); Tpitch[:3,3]=[0.009,-0.0346,0.4064+0.0485]
+          yaw.apply_transform(Tyaw)
+          pitch.apply_transform(Tpitch)
+
+          # URDF: X forward, Y left, Z up -> CAD/glTF: X left/right, Y up, Z depth.
+          # x_cad = y_urdf, y_cad = z_urdf, z_cad = x_urdf.
+          U2C=np.array([
+              [0,1,0,0],
+              [0,0,1,0],
+              [1,0,0,0],
+              [0,0,0,1]
+          ],dtype=float)
+          yaw.apply_transform(U2C)
+          pitch.apply_transform(U2C)
+
+          head=trimesh.util.concatenate([yaw,pitch])
+          hb=head.bounds.copy()
+          hc=(hb[0]+hb[1])/2
+          bc=(body_bounds[0]+body_bounds[1])/2
+
+          # Put official head on the CAD neck. Slight overlap avoids a visible gap.
+          target_bottom=body_bounds[1,1]-0.025
+          move=np.array([
+              bc[0]-hc[0],
+              target_bottom-hb[0,1],
+              bc[2]-hc[2]
+          ])
+          H=np.eye(4); H[:3,3]=move
+          yaw.apply_transform(H); pitch.apply_transform(H)
+
+          yaw.visual=TextureVisuals(material=PBRMaterial(
+              name="Head_Yaw_Silver", baseColorFactor=[0.66,0.70,0.74,1],
+              metallicFactor=0.50, roughnessFactor=0.28, doubleSided=True))
+          pitch.visual=TextureVisuals(material=PBRMaterial(
+              name="Head_Pitch_Graphite", baseColorFactor=[0.24,0.27,0.31,1],
+              metallicFactor=0.45, roughnessFactor=0.30, doubleSided=True))
+
+          scene.add_geometry(yaw,node_name="HEAD__YAW",geom_name="HEAD__YAW")
+          scene.add_geometry(pitch,node_name="HEAD__PITCH",geom_name="HEAD__PITCH")
+
+          # Center around X/Z and put feet on Y=0.
+          b=scene.bounds.copy()
+          c=(b[0]+b[1])/2
+          T=np.eye(4)
+          T[0,3]=-c[0]
+          T[2,3]=-c[2]
+          T[1,3]=-b[0,1]
+          scene.apply_transform(T)
+
+          print("final bounds",scene.bounds.tolist(),"extents",scene.extents.tolist())
+          with open(out,"wb") as f:
+              f.write(scene.export(file_type="glb"))
+
+          manifest={
+            "source_body":"QingLoong_V2.5_FullBody_CAD.glb, directly tessellated from official 1.419 GB master STEP",
+            "head_source":"official QingLoong V2.5 Link_head_yaw.STL + Link_head_pitch.STL",
+            "axis_correction":"restored actual STEP Y-up orientation for normal 360-degree model-viewer orbit",
+            "body_geometry_nodes":len(scene.geometry)-2,
+            "head_nodes":2,
+            "final_geometry_nodes":len(scene.geometry),
+            "extents_m":scene.extents.tolist(),
+            "output_bytes":os.path.getsize(out),
+            "note":"Complete interactive full-detail model. Head is added from the official V2.5 robot visual meshes because the released master STEP resolves the head as an external assembly and did not embed it when converted standalone."
+          }
+          json.dump(manifest,open(man,"w"),indent=2)
+          print(json.dumps(manifest,indent=2))
+          PY
+          ls -lh dist/
+
+      - name: Publish corrected release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="qingloong-cad-complete-360"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG"             --title "QingLoong V2.5 Complete CAD 360 GLB"             --notes "Corrected Y-up orientation for full 360-degree orbit, full CAD body, and restored official QingLoong V2.5 head visual assembly."
+          gh release upload "$TAG"             dist/QingLoong_V2.5_FullBody_CAD_Complete_360.glb             dist/QingLoong_V2.5_FullBody_CAD_Complete_360_manifest.json --clobber
