@@ -1,0 +1,258 @@
+name: Build QingLoong V2.5 CAD GLB
+
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths:
+      - ".github/workflows/build_qingloong_cad_glb.yml"
+  workflow_dispatch:
+
+jobs:
+  build-cad:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout fork without downloading all LFS
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: false
+
+      - name: Install Git LFS and FreeCAD
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs freecad-python3
+          git lfs install
+
+      - name: Pull only the QingLoong V2.5 master STEP
+        shell: bash
+        run: |
+          STEP_REL="QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-Qinglong Humanoid Robot - Master Assembly.STEP"
+          git lfs pull --include="$STEP_REL" --exclude=""
+          ls -lh "$STEP_REL"
+          python3 - <<'PY'
+          import os
+          p="QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-Qinglong Humanoid Robot - Master Assembly.STEP"
+          s=os.path.getsize(p)
+          print("STEP bytes:", s)
+          if s < 100_000_000:
+              raise SystemExit("Master STEP is still an LFS pointer or incomplete.")
+          PY
+
+      - name: Install Python mesh exporter
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --break-system-packages "trimesh>=4.4" "numpy<3"
+
+      - name: Convert master STEP to CAD-quality GLB
+        shell: bash
+        run: |
+          mkdir -p dist
+          cat > /tmp/qingloong_cad_export.py <<'PY'
+          import os, sys, json, math, hashlib
+          import numpy as np
+          import trimesh
+
+          import FreeCAD as App
+          import Part
+          import Import
+          import MeshPart
+
+          STEP = os.path.abspath(
+              "QingLoong V2.5/en/QingLoong V2.5 - 3D File/"
+              "TA00-Assemblies of Modules - 3D File/"
+              "TA00-Qinglong Humanoid Robot - Master Assembly.STEP"
+          )
+          OUT_DIR = os.path.abspath("dist")
+          FULL = os.path.join(OUT_DIR, "QingLoong_V2.5_FullBody_CAD.glb")
+          WEB  = os.path.join(OUT_DIR, "QingLoong_V2.5_FullBody_CAD_Web.glb")
+          MAN  = os.path.join(OUT_DIR, "QingLoong_V2.5_FullBody_CAD_manifest.json")
+
+          # Millimetres -> metres for glTF.
+          MM_TO_M = 0.001
+
+          def color_from_name(name):
+              n=(name or "").lower()
+              if any(k in n for k in ["window","lens","camera","lidar","radar"]):
+                  return np.array([35,45,55,255], dtype=np.uint8)
+              if any(k in n for k in ["rubber","pad","tire","grip"]):
+                  return np.array([45,45,48,255], dtype=np.uint8)
+              if any(k in n for k in ["motor","bearing","shaft","screw","pin","axis","flange"]):
+                  return np.array([105,110,118,255], dtype=np.uint8)
+              if any(k in n for k in ["cover","shell","case","casing","protection","frame"]):
+                  return np.array([205,210,216,255], dtype=np.uint8)
+              return np.array([155,162,170,255], dtype=np.uint8)
+
+          def placement_matrix(obj):
+              try:
+                  p = obj.getGlobalPlacement()
+              except Exception:
+                  p = getattr(obj, "Placement", App.Placement())
+              m = p.toMatrix()
+              A = np.array([
+                  [m.A11,m.A12,m.A13,m.A14],
+                  [m.A21,m.A22,m.A23,m.A24],
+                  [m.A31,m.A32,m.A33,m.A34],
+                  [m.A41,m.A42,m.A43,m.A44],
+              ], dtype=float)
+              A[:3,3] *= MM_TO_M
+              return A
+
+          def mesh_object(obj, lin_defl_mm, ang_defl):
+              shp = obj.Shape
+              if shp.isNull():
+                  return None
+              mesh = MeshPart.meshFromShape(
+                  Shape=shp,
+                  LinearDeflection=lin_defl_mm,
+                  AngularDeflection=ang_defl,
+                  Relative=False
+              )
+              verts = np.array([[p.x,p.y,p.z] for p in mesh.Points], dtype=np.float64) * MM_TO_M
+              faces = np.array([f.PointIndices for f in mesh.Facets], dtype=np.int64)
+              if len(verts)==0 or len(faces)==0:
+                  return None
+              tm = trimesh.Trimesh(vertices=verts, faces=faces, process=False, validate=False)
+              rgba = color_from_name(getattr(obj, "Label", obj.Name))
+              # Try to honor imported CAD display color when available.
+              try:
+                  sc = obj.ViewObject.ShapeColor
+                  cad = np.array([sc[0],sc[1],sc[2],1.0])
+                  if cad[:3].max() <= 1.0:
+                      rgba = np.round(np.clip(cad,0,1)*255).astype(np.uint8)
+              except Exception:
+                  pass
+              tm.visual.face_colors = np.tile(rgba, (len(tm.faces),1))
+              return tm
+
+          def export_scene(doc, out_path, lin_defl_mm, ang_defl, simplify=False):
+              scene = trimesh.Scene()
+              records=[]
+              # Favor leaf Part features to avoid duplicate parent compounds.
+              candidates=[]
+              for obj in doc.Objects:
+                  if not hasattr(obj, "Shape"):
+                      continue
+                  try:
+                      if obj.Shape.isNull():
+                          continue
+                  except Exception:
+                      continue
+                  # Skip container objects that explicitly own children.
+                  children = []
+                  for attr in ("Group","OutList"):
+                      try:
+                          children = list(getattr(obj,attr))
+                          if children:
+                              break
+                      except Exception:
+                          pass
+                  if children and getattr(obj,"TypeId","") in ("App::Part","App::DocumentObjectGroup"):
+                      continue
+                  candidates.append(obj)
+
+              # If Import produced one large compound, this remains one object and is still valid.
+              for idx,obj in enumerate(candidates):
+                  print(f"[{idx+1}/{len(candidates)}] tessellating {getattr(obj,'Label',obj.Name)}")
+                  try:
+                      tm = mesh_object(obj, lin_defl_mm, ang_defl)
+                  except Exception as e:
+                      print("  failed:", repr(e))
+                      continue
+                  if tm is None:
+                      continue
+                  if simplify and len(tm.faces) > 120000:
+                      try:
+                          target=max(50000,int(len(tm.faces)*0.45))
+                          tm=tm.simplify_quadric_decimation(target)
+                      except Exception:
+                          pass
+                  name=(getattr(obj,"Label",obj.Name) or obj.Name).strip()
+                  name=f"{idx:04d}_{name}"[:180]
+                  scene.add_geometry(tm, node_name=name, geom_name=name, transform=placement_matrix(obj))
+                  records.append({
+                      "name":name,
+                      "type":getattr(obj,"TypeId",""),
+                      "vertices":int(len(tm.vertices)),
+                      "faces":int(len(tm.faces))
+                  })
+
+              if not scene.geometry:
+                  raise RuntimeError("No geometry exported from STEP")
+
+              # Reorient FreeCAD Z-up to glTF Y-up, with a conventional front-facing setup.
+              R=np.array([
+                  [1,0,0,0],
+                  [0,0,1,0],
+                  [0,-1,0,0],
+                  [0,0,0,1]], dtype=float)
+              scene.apply_transform(R)
+
+              # Place feet/lowest point at y=0 and center x/z.
+              b=scene.bounds.copy()
+              c=(b[0]+b[1])/2.0
+              T=np.eye(4)
+              T[0,3]=-c[0]
+              T[2,3]=-c[2]
+              T[1,3]=-b[0,1]
+              scene.apply_transform(T)
+
+              with open(out_path,"wb") as f:
+                  f.write(scene.export(file_type="glb"))
+              return scene, records
+
+          print("Opening STEP:", STEP)
+          doc=App.newDocument("QingLoongCAD")
+          Import.insert(STEP, doc.Name)
+          doc.recompute()
+          print("Imported objects:", len(doc.Objects))
+
+          # High-detail CAD view: 0.45 mm chord tolerance, ~12 degree angular tolerance.
+          full_scene, full_records = export_scene(doc, FULL, 0.45, math.radians(12), simplify=False)
+          # Web-friendly CAD view: 1.2 mm chord tolerance plus moderate decimation.
+          web_scene, web_records = export_scene(doc, WEB, 1.2, math.radians(18), simplify=True)
+
+          def stats(scene, records, path):
+              b=scene.bounds
+              return {
+                  "file":os.path.basename(path),
+                  "bytes":os.path.getsize(path),
+                  "nodes":len(records),
+                  "vertices":sum(r["vertices"] for r in records),
+                  "faces":sum(r["faces"] for r in records),
+                  "bounds_m":b.tolist(),
+                  "extents_m":(b[1]-b[0]).tolist(),
+              }
+
+          manifest={
+              "source":"TA00-Qinglong Humanoid Robot - Master Assembly.STEP",
+              "source_bytes":os.path.getsize(STEP),
+              "source_sha256":hashlib.sha256(open(STEP,"rb").read(1024*1024)).hexdigest()+" (first 1 MiB only)",
+              "imported_freecad_objects":len(doc.Objects),
+              "full":stats(full_scene,full_records,FULL),
+              "web":stats(web_scene,web_records,WEB),
+              "full_objects":full_records,
+              "note":"GLBs are tessellated directly from the official QingLoong V2.5 master STEP. STEP normally carries CAD geometry/colors, not photographic texture maps."
+          }
+          with open(MAN,"w") as f:
+              json.dump(manifest,f,indent=2)
+          print(json.dumps({k:v for k,v in manifest.items() if k!="full_objects"},indent=2))
+          PY
+
+          freecadcmd /tmp/qingloong_cad_export.py
+
+      - name: Show outputs
+        run: |
+          ls -lh dist/
+          cat dist/QingLoong_V2.5_FullBody_CAD_manifest.json | head -100
+
+      - name: Upload CAD GLBs
+        uses: actions/upload-artifact@v4
+        with:
+          name: QingLoong_V2.5_FullBody_CAD
+          path: |
+            dist/QingLoong_V2.5_FullBody_CAD.glb
+            dist/QingLoong_V2.5_FullBody_CAD_Web.glb
+            dist/QingLoong_V2.5_FullBody_CAD_manifest.json
+          if-no-files-found: error
+          retention-days: 30
