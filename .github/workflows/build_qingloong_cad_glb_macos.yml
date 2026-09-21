@@ -17,25 +17,19 @@ jobs:
           fetch-depth: 1
           lfs: false
 
-      - name: Download master STEP from upstream LFS
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download master STEP from release
         shell: bash
         run: |
           set -euo pipefail
-          STEP_REL="QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-Qinglong Humanoid Robot - Master Assembly.STEP"
-          OID=$(awk '/^oid sha256:/{sub("sha256:","",$2); print $2}' "$STEP_REL")
-          SIZE=$(awk '/^size /{print $2}' "$STEP_REL")
-          printf '{"operation":"download","transfers":["basic"],"objects":[{"oid":"%s","size":%s}]}' "$OID" "$SIZE" > /tmp/lfs_req.json
-          curl -fLsS -u "$GITHUB_ACTOR:$GH_TOKEN"             -H "Accept: application/vnd.git-lfs+json"             -H "Content-Type: application/vnd.git-lfs+json"             --data-binary @/tmp/lfs_req.json             "https://github.com/loongOpen/OpenLoong-Hardware.git/info/lfs/objects/batch"             -o /tmp/lfs_resp.json
-          HREF=$(python3 - <<'PY'
-          import json
-          d=json.load(open("/tmp/lfs_resp.json"))
-          print(d["objects"][0]["actions"]["download"]["href"])
-          PY
-          )
-          curl -fL --retry 5 "$HREF" -o "$STEP_REL"
-          ls -lh "$STEP_REL"
+          curl -L --fail --retry 6 --retry-delay 5 -o /tmp/q.zip "https://github.com/dramitavadas/OpenLoong-Hardware/releases/download/qingloong-master-step/QingLoong_Master.zip"
+          echo "1120363fe8491f502614fdf9b2ba21d94ff878e466f0da7d3ea77e7ebf41e904  /tmp/q.zip" | shasum -a 256 -c -
+          mkdir -p cad_src
+          unzip -o /tmp/q.zip -d cad_src
+          STEP="$(find cad_src -type f \( -iname '*.step' -o -iname '*.stp' \) | head -1)"
+          test -n "$STEP"
+          test "$(stat -f%z "$STEP")" -gt 1000000000
+          cp "$STEP" /tmp/QingLoong_Master.STEP
+          ls -lh /tmp/QingLoong_Master.STEP
 
       - uses: actions/setup-python@v5
         with:
@@ -44,7 +38,9 @@ jobs:
       - name: Install CAD conversion dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "cadquery>=2.5" "trimesh>=4.4" numpy scipy
+          pip install "numpy<2" "scipy<1.14" "trimesh==4.8.3"
+          pip install "cadquery==2.5.2" --no-deps
+          pip install "cadquery-ocp>=7.7,<7.8" multimethod nlopt typish casadi path ezdxf
 
       - name: Convert master STEP to CAD GLB
         shell: bash
@@ -58,7 +54,7 @@ jobs:
           from trimesh.visual.material import PBRMaterial
           from trimesh.visual.texture import TextureVisuals
 
-          STEP=os.path.abspath("QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-Qinglong Humanoid Robot - Master Assembly.STEP")
+          STEP="/tmp/QingLoong_Master.STEP"
           OUT=os.path.abspath("dist/QingLoong_V2.5_FullBody_CAD.glb")
           MAN=os.path.abspath("dist/QingLoong_V2.5_FullBody_CAD_manifest.json")
 
