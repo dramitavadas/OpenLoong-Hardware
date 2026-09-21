@@ -1,0 +1,115 @@
+name: Build QingLoong CAD GLB macOS
+
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths:
+      - ".github/workflows/build_qingloong_cad_glb_macos.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: false
+
+      - name: Download master STEP from upstream LFS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STEP_REL="QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-Qinglong Humanoid Robot - Master Assembly.STEP"
+          OID=$(awk '/^oid sha256:/{sub("sha256:","",$2); print $2}' "$STEP_REL")
+          SIZE=$(awk '/^size /{print $2}' "$STEP_REL")
+          printf '{"operation":"download","transfers":["basic"],"objects":[{"oid":"%s","size":%s}]}' "$OID" "$SIZE" > /tmp/lfs_req.json
+          curl -fLsS -u "$GITHUB_ACTOR:$GH_TOKEN"             -H "Accept: application/vnd.git-lfs+json"             -H "Content-Type: application/vnd.git-lfs+json"             --data-binary @/tmp/lfs_req.json             "https://github.com/loongOpen/OpenLoong-Hardware.git/info/lfs/objects/batch"             -o /tmp/lfs_resp.json
+          HREF=$(python3 - <<'PY'
+          import json
+          d=json.load(open("/tmp/lfs_resp.json"))
+          print(d["objects"][0]["actions"]["download"]["href"])
+          PY
+          )
+          curl -fL --retry 5 "$HREF" -o "$STEP_REL"
+          ls -lh "$STEP_REL"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CAD conversion dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "cadquery>=2.5" "trimesh>=4.4" numpy scipy
+
+      - name: Convert master STEP to CAD GLB
+        shell: bash
+        run: |
+          mkdir -p dist
+          cat > /tmp/convert.py <<'PY'
+          import os, time, json, math, gc
+          import numpy as np
+          import cadquery as cq
+          import trimesh
+          from trimesh.visual.material import PBRMaterial
+          from trimesh.visual.texture import TextureVisuals
+
+          STEP=os.path.abspath("QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-Qinglong Humanoid Robot - Master Assembly.STEP")
+          OUT=os.path.abspath("dist/QingLoong_V2.5_FullBody_CAD.glb")
+          MAN=os.path.abspath("dist/QingLoong_V2.5_FullBody_CAD_manifest.json")
+
+          print("loading STEP", STEP, os.path.getsize(STEP))
+          t=time.time()
+          wp=cq.importers.importStep(STEP)
+          shape=wp.val()
+          print("loaded in", time.time()-t, "seconds")
+          try: print("solids", len(shape.Solids()))
+          except Exception as e: print("solids error",e)
+
+          t=time.time()
+          verts,tris=shape.tessellate(0.65, math.radians(12))
+          print("tessellated", len(verts), len(tris), "in", time.time()-t)
+          V=np.asarray([[v.x,v.y,v.z] for v in verts],dtype=np.float32)*0.001
+          F=np.asarray(tris,dtype=np.int64)
+          mesh=trimesh.Trimesh(V,F,process=False,validate=False)
+          mesh.visual=TextureVisuals(material=PBRMaterial(
+              name="QingLoong CAD",
+              baseColorFactor=[0.50,0.54,0.60,1.0],
+              metallicFactor=0.55,
+              roughnessFactor=0.30,
+              doubleSided=True
+          ))
+          R=np.array([[1,0,0,0],[0,0,1,0],[0,-1,0,0],[0,0,0,1]],float)
+          mesh.apply_transform(R)
+          b=mesh.bounds.copy(); c=(b[0]+b[1])/2
+          T=np.eye(4); T[0,3]=-c[0]; T[2,3]=-c[2]; T[1,3]=-b[0,1]
+          mesh.apply_transform(T)
+          with open(OUT,"wb") as f: f.write(mesh.export(file_type="glb"))
+          man={
+            "source_bytes":os.path.getsize(STEP),
+            "vertices":len(mesh.vertices),
+            "faces":len(mesh.faces),
+            "extents_m":mesh.extents.tolist(),
+            "output_bytes":os.path.getsize(OUT),
+            "source":"official QingLoong V2.5 master STEP",
+            "tessellation_tolerance_mm":0.65,
+            "angular_tolerance_deg":12,
+            "note":"Direct master-STEP tessellation, not URDF/STL."
+          }
+          json.dump(man,open(MAN,"w"),indent=2)
+          print(json.dumps(man,indent=2))
+          PY
+          python /tmp/convert.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QingLoong_V2.5_FullBody_CAD_macOS
+          path: |
+            dist/QingLoong_V2.5_FullBody_CAD.glb
+            dist/QingLoong_V2.5_FullBody_CAD_manifest.json
+          compression-level: 0
+          retention-days: 30
