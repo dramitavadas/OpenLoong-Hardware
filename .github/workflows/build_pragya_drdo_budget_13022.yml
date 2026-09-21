@@ -260,6 +260,14 @@ jobs:
           python /tmp/build_budget.py
           ls -lh Pragya_Lab_DRDO_Budget_1.3022_Crore_September_2026.pdf
 
+      - name: Upload PDF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pragya_Lab_DRDO_Budget_1.3022_Crore_September_2026
+          path: Pragya_Lab_DRDO_Budget_1.3022_Crore_September_2026.pdf
+          compression-level: 0
+          retention-days: 30
+
       - name: Publish PDF release
         env:
           GH_TOKEN: ${{ github.token }}
