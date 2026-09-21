@@ -29,8 +29,9 @@ jobs:
         run: |
           STEP_REL="QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-Qinglong Humanoid Robot - Master Assembly.STEP"
           git remote add upstream https://github.com/loongOpen/OpenLoong-Hardware.git || true
-          # The fork carries the LFS pointer, while the binary object lives on the upstream LFS store.
-          git lfs fetch upstream main --include="$STEP_REL" --exclude=""
+          # Fetch the upstream main ref first, then fetch only the required LFS object.
+          git fetch --depth=1 upstream main:refs/remotes/upstream/main
+          git lfs fetch upstream refs/remotes/upstream/main --include="$STEP_REL" --exclude=""
           git lfs checkout "$STEP_REL"
           ls -lh "$STEP_REL"
           python3 - <<'PY'
