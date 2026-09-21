@@ -1,4 +1,4 @@
-name: Build QingLoong V2.5 CAD GLB
+name: Build QingLoong CAD-quality GLB
 
 on:
   push:
@@ -8,66 +8,35 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-cad:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Checkout fork without all LFS
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           lfs: false
 
-      - name: Install Git LFS
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git-lfs
-          git lfs install
-
-      - name: Pull only the QingLoong V2.5 master STEP
+      - name: Download uploaded master CAD archive
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          STEP_REL="QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-Qinglong Humanoid Robot - Master Assembly.STEP"
-
-          echo "Pointer before download:"
-          cat "$STEP_REL"
-          OID=$(awk '/^oid sha256:/{sub("sha256:","",$2); print $2}' "$STEP_REL")
-          SIZE=$(awk '/^size /{print $2}' "$STEP_REL")
-          echo "OID=$OID SIZE=$SIZE"
-
-          cat > /tmp/lfs_req.json <<JSON
-          {"operation":"download","transfers":["basic"],"objects":[{"oid":"$OID","size":$SIZE}]}
-          JSON
-
-          curl -fLsS             -u "$GITHUB_ACTOR:$GH_TOKEN"             -H "Accept: application/vnd.git-lfs+json"             -H "Content-Type: application/vnd.git-lfs+json"             --data-binary @/tmp/lfs_req.json             "https://github.com/loongOpen/OpenLoong-Hardware.git/info/lfs/objects/batch"             -o /tmp/lfs_resp.json
-
-          cat /tmp/lfs_resp.json | head -c 3000
-          echo
-
-          HREF=$(python3 - <<'PY'
-          import json
-          d=json.load(open("/tmp/lfs_resp.json"))
-          o=d["objects"][0]
-          if "error" in o:
-              raise SystemExit("LFS server error: "+str(o["error"]))
-          print(o["actions"]["download"]["href"])
-          PY
-          )
-
-          echo "Downloading 1.32 GB master STEP from upstream LFS..."
-          curl -fL --retry 5 --retry-delay 3 "$HREF" -o "$STEP_REL"
-          ls -lh "$STEP_REL"
-
-          python3 - <<'PY'
-          import os
-          p="QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-Qinglong Humanoid Robot - Master Assembly.STEP"
-          s=os.path.getsize(p)
-          print("STEP bytes:", s)
-          if s < 1_000_000_000:
-              raise SystemExit("Master STEP download is incomplete.")
+          set -euxo pipefail
+          URL="https://github.com/dramitavadas/OpenLoong-Hardware/releases/download/qingloong-master-step/QingLoong_Master.zip"
+          curl -L --fail --retry 6 --retry-delay 5 -o QingLoong_Master.zip "$URL"
+          echo "1120363fe8491f502614fdf9b2ba21d94ff878e466f0da7d3ea77e7ebf41e904  QingLoong_Master.zip" | sha256sum -c -
+          mkdir -p cad_src
+          unzip -o QingLoong_Master.zip -d cad_src
+          STEP="$(find cad_src -type f \( -iname '*.step' -o -iname '*.stp' \) | head -1)"
+          test -n "$STEP"
+          ls -lh "$STEP"
+          python3 - "$STEP" <<'PY'
+          import os, sys
+          p=sys.argv[1]
+          n=os.path.getsize(p)
+          print("STEP bytes:", n)
+          if n < 1_000_000_000:
+              raise SystemExit("Expected the ~1.32 GB QingLoong master STEP; extracted file is too small.")
           PY
 
       - name: Set up Python
@@ -75,160 +44,185 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install CAD and GLB dependencies
+      - name: Install CAD conversion stack
         run: |
           python -m pip install --upgrade pip
-          pip install "cadquery>=2.5" "trimesh>=4.4" numpy scipy
+          pip install "cadquery>=2.5,<2.7" "trimesh>=4.4" "numpy<3" scipy
 
-      - name: Convert master STEP to CAD-quality GLBs
+      - name: Tessellate official master STEP into CAD-quality GLB
         shell: bash
         run: |
+          set -euxo pipefail
+          STEP="$(find cad_src -type f \( -iname '*.step' -o -iname '*.stp' \) | head -1)"
           mkdir -p dist
-          cat > /tmp/build_cad_glb.py <<'PY'
-          import os, json, math, gc, hashlib, time
+          export QINGLOONG_STEP="$STEP"
+          python - <<'PY'
+          import os, math, json, time
           import numpy as np
           import cadquery as cq
           import trimesh
           from trimesh.visual.material import PBRMaterial
           from trimesh.visual.texture import TextureVisuals
 
-          STEP = os.path.abspath(
-              "QingLoong V2.5/en/QingLoong V2.5 - 3D File/"
-              "TA00-Assemblies of Modules - 3D File/"
-              "TA00-Qinglong Humanoid Robot - Master Assembly.STEP"
-          )
-          OUT = os.path.abspath("dist")
-          FULL = os.path.join(OUT, "QingLoong_V2.5_FullBody_CAD.glb")
-          WEB = os.path.join(OUT, "QingLoong_V2.5_FullBody_CAD_Web.glb")
-          MAN = os.path.join(OUT, "QingLoong_V2.5_FullBody_CAD_manifest.json")
+          STEP=os.environ["QINGLOONG_STEP"]
+          OUT="dist/QingLoong_V2.5_FullBody_CAD.glb"
+          MAN="dist/QingLoong_V2.5_FullBody_CAD_manifest.json"
 
-          def tessellate_to_trimesh(shape, tolerance_mm, angular_tol):
-              t0=time.time()
-              verts, tris = shape.tessellate(tolerance_mm, angular_tol)
-              vertices=np.asarray([[v.x,v.y,v.z] for v in verts], dtype=np.float32) * 0.001
-              faces=np.asarray(tris, dtype=np.int64)
-              print("tessellation", tolerance_mm, "mm ->", len(vertices), "verts", len(faces), "faces", "sec", time.time()-t0)
-              tm=trimesh.Trimesh(vertices=vertices, faces=faces, process=False, validate=False)
-
-              # CAD-like two-sided PBR material: metallic neutral gray so fine geometry is visible
-              # in browser viewers without the washed-out all-white appearance of the URDF model.
-              mat=PBRMaterial(
-                  name="QingLoong_CAD_Metal",
-                  baseColorFactor=[0.50,0.54,0.59,1.0],
-                  metallicFactor=0.55,
-                  roughnessFactor=0.32,
-                  doubleSided=True
-              )
-              tm.visual=TextureVisuals(material=mat)
-
-              # STEP is Z-up; glTF is Y-up.
-              R=np.array([
-                  [1,0,0,0],
-                  [0,0,1,0],
-                  [0,-1,0,0],
-                  [0,0,0,1]], dtype=float)
-              tm.apply_transform(R)
-
-              # Center model and put feet/lowest point on ground.
-              b=tm.bounds.copy()
-              c=(b[0]+b[1])/2
-              T=np.eye(4)
-              T[0,3]=-c[0]
-              T[2,3]=-c[2]
-              T[1,3]=-b[0,1]
-              tm.apply_transform(T)
-              return tm
-
-          print("Loading CAD STEP:", STEP)
+          print("Loading STEP:", STEP)
           t0=time.time()
           wp=cq.importers.importStep(STEP)
           shape=wp.val()
-          print("STEP loaded in", time.time()-t0, "seconds")
-          print("shape type:", type(shape).__name__)
-          try:
-              print("solids:", len(shape.Solids()))
-          except Exception as e:
-              print("solids unavailable:", e)
+          print("STEP loaded in %.1f sec" % (time.time()-t0))
 
-          full=tessellate_to_trimesh(shape, 0.45, math.radians(10))
-          with open(FULL,"wb") as f:
-              f.write(full.export(file_type="glb"))
-          full_stats={
-              "file":os.path.basename(FULL),
-              "bytes":os.path.getsize(FULL),
-              "vertices":int(len(full.vertices)),
-              "faces":int(len(full.faces)),
-              "bounds_m":full.bounds.tolist(),
-              "extents_m":full.extents.tolist()
+          bb=shape.BoundingBox()
+          xmin,xmax=bb.xmin,bb.xmax
+          ymin,ymax=bb.ymin,bb.ymax
+          zmin,zmax=bb.zmin,bb.zmax
+          ymid=(ymin+ymax)/2
+          zspan=max(zmax-zmin,1e-6)
+          yhalf=max((ymax-ymin)/2,1e-6)
+
+          solids=list(shape.Solids())
+          print("Solid count:", len(solids))
+          print("CAD bounds mm:", [xmin,ymin,zmin], [xmax,ymax,zmax])
+
+          materials={
+            "shell": PBRMaterial(name="Shell_Satin", baseColorFactor=[0.68,0.72,0.76,1], metallicFactor=0.28, roughnessFactor=0.30, doubleSided=True),
+            "aluminum": PBRMaterial(name="Aluminum", baseColorFactor=[0.42,0.47,0.53,1], metallicFactor=0.78, roughnessFactor=0.24, doubleSided=True),
+            "gunmetal": PBRMaterial(name="Gunmetal", baseColorFactor=[0.18,0.21,0.25,1], metallicFactor=0.82, roughnessFactor=0.24, doubleSided=True),
+            "dark": PBRMaterial(name="Dark_Mechanical", baseColorFactor=[0.075,0.085,0.10,1], metallicFactor=0.70, roughnessFactor=0.30, doubleSided=True),
+            "accent": PBRMaterial(name="Joint_Accent", baseColorFactor=[0.30,0.33,0.38,1], metallicFactor=0.90, roughnessFactor=0.20, doubleSided=True),
           }
-          print("FULL:", json.dumps(full_stats, indent=2))
 
-          del full
-          gc.collect()
+          def classify_material(s):
+              b=s.BoundingBox()
+              diag=(b.xlen*b.xlen+b.ylen*b.ylen+b.zlen*b.zlen)**0.5
+              try: vol=abs(s.Volume())
+              except Exception: vol=0.0
+              if diag < 12 or vol < 150:
+                  return "dark"
+              if diag < 35:
+                  return "gunmetal"
+              if diag < 100:
+                  return "accent"
+              if diag < 220:
+                  return "aluminum"
+              return "shell"
 
-          web=tessellate_to_trimesh(shape, 1.25, math.radians(18))
-          # Keep web copy reasonably light while still derived directly from master CAD.
-          if len(web.faces) > 800_000:
+          def region_name(s):
+              b=s.BoundingBox()
+              cy=(b.ymin+b.ymax)/2
+              cz=(b.zmin+b.zmax)/2
+              zn=(cz-zmin)/zspan
+              lateral=(cy-ymid)/yhalf
+              if zn > 0.82:
+                  return "HEAD"
+              if zn > 0.53:
+                  if abs(lateral) > 0.72:
+                      return "HAND_L" if lateral > 0 else "HAND_R"
+                  if abs(lateral) > 0.25:
+                      return "ARM_L" if lateral > 0 else "ARM_R"
+                  return "TORSO"
+              if zn > 0.42:
+                  return "WAIST"
+              if zn > 0.20:
+                  return "LEG_L" if lateral > 0 else "LEG_R"
+              return "FOOT_L" if lateral > 0 else "FOOT_R"
+
+          LIN=0.65
+          ANG=math.radians(9.0)
+
+          scene=trimesh.Scene()
+          counts={}
+          total_faces=0
+          total_vertices=0
+          failures=[]
+          tmesh=time.time()
+
+          for i,s in enumerate(solids,1):
+              reg=region_name(s)
+              matkey=classify_material(s)
+              counts[reg]=counts.get(reg,0)+1
               try:
-                  web=web.simplify_quadric_decimation(800_000)
+                  verts,tris=s.tessellate(LIN,ANG)
+                  if not verts or not tris:
+                      continue
+                  V=np.asarray([[v.x,v.y,v.z] for v in verts],dtype=np.float32)*0.001
+                  F=np.asarray(tris,dtype=np.int64)
+                  mesh=trimesh.Trimesh(vertices=V,faces=F,process=False,validate=False)
+                  mesh.visual=TextureVisuals(material=materials[matkey])
+                  node=f"{reg}__{matkey}__{i:05d}"
+                  scene.add_geometry(mesh,node_name=node,geom_name=node)
+                  total_faces += len(F)
+                  total_vertices += len(V)
               except Exception as e:
-                  print("web decimation skipped:", e)
-          with open(WEB,"wb") as f:
-              f.write(web.export(file_type="glb"))
-          web_stats={
-              "file":os.path.basename(WEB),
-              "bytes":os.path.getsize(WEB),
-              "vertices":int(len(web.vertices)),
-              "faces":int(len(web.faces)),
-              "bounds_m":web.bounds.tolist(),
-              "extents_m":web.extents.tolist()
-          }
-          print("WEB:", json.dumps(web_stats, indent=2))
+                  failures.append({"solid":i,"error":repr(e)})
+              if i % 100 == 0:
+                  print(f"{i}/{len(solids)} solids | {total_faces:,} faces")
 
-          with open(STEP,"rb") as fh:
-              head=fh.read(16*1024*1024)
+          print("Tessellated in %.1f sec" % (time.time()-tmesh))
+          print("Faces:", total_faces, "Vertices:", total_vertices, "Failures:", len(failures))
+
+          R=np.array([[1,0,0,0],[0,0,1,0],[0,-1,0,0],[0,0,0,1]],dtype=float)
+          scene.apply_transform(R)
+
+          b=scene.bounds.copy()
+          c=(b[0]+b[1])/2
+          T=np.eye(4)
+          T[0,3]=-c[0]
+          T[2,3]=-c[2]
+          T[1,3]=-b[0,1]
+          scene.apply_transform(T)
+
+          glb=scene.export(file_type="glb")
+          with open(OUT,"wb") as f:
+              f.write(glb)
+
           manifest={
-              "source_file":"TA00-Qinglong Humanoid Robot - Master Assembly.STEP",
-              "source_bytes":os.path.getsize(STEP),
-              "source_first16MiB_sha256":hashlib.sha256(head).hexdigest(),
-              "source_type":"official QingLoong V2.5 master STEP",
-              "conversion":"direct OpenCascade/CadQuery tessellation from master STEP",
-              "full_tolerance_mm":0.45,
-              "full_angular_tolerance_deg":10,
-              "web_tolerance_mm":1.25,
-              "web_angular_tolerance_deg":18,
-              "full":full_stats,
-              "web":web_stats,
-              "materials":"CAD-style PBR metallic neutral gray; STEP geometry preserved. STEP does not provide photographic texture maps.",
-              "note":"This is not the simplified URDF/STL model. Geometry is tessellated directly from the 1.32 GB QingLoong V2.5 master assembly STEP, including whatever hands/finger geometry is present in that master CAD."
+            "source":"official QingLoong V2.5 master assembly STEP",
+            "source_filename":os.path.basename(STEP),
+            "source_bytes":os.path.getsize(STEP),
+            "solid_count":len(solids),
+            "regions":counts,
+            "linear_deflection_mm":LIN,
+            "angular_tolerance_deg":9.0,
+            "vertices":int(total_vertices),
+            "faces":int(total_faces),
+            "failed_solids":failures[:100],
+            "failed_solid_count":len(failures),
+            "output":os.path.basename(OUT),
+            "output_bytes":os.path.getsize(OUT),
+            "bounds_m":scene.bounds.tolist(),
+            "extents_m":scene.extents.tolist(),
+            "material_note":"The official STEP provides CAD geometry, not photographic texture maps. This GLB uses high-contrast PBR CAD materials so mechanical detail is visible in model-viewer.",
+            "hand_note":"All hand/finger solids present in the master STEP are included; solids are spatially grouped/named as HAND_L/HAND_R for future explode-view work."
           }
           with open(MAN,"w") as f:
               json.dump(manifest,f,indent=2)
           print(json.dumps(manifest,indent=2))
           PY
-          python /tmp/build_cad_glb.py
 
-      - name: Validate outputs
+      - name: Validate output
         run: |
           ls -lh dist/
           python - <<'PY'
           import json, os
-          p="dist/QingLoong_V2.5_FullBody_CAD_manifest.json"
-          m=json.load(open(p))
-          print(json.dumps(m,indent=2))
+          m=json.load(open("dist/QingLoong_V2.5_FullBody_CAD_manifest.json"))
           assert m["source_bytes"] > 1_000_000_000
-          assert m["full"]["bytes"] > 1_000_000
-          assert max(m["full"]["extents_m"]) > 1.5
+          assert m["solid_count"] > 10
+          assert m["faces"] > 100_000
+          assert max(m["extents_m"]) > 1.5
+          assert os.path.getsize("dist/QingLoong_V2.5_FullBody_CAD.glb") > 1_000_000
+          print("Validation OK")
           PY
 
-      - name: Upload CAD GLBs
+      - name: Upload CAD-quality GLB
         uses: actions/upload-artifact@v4
         with:
           name: QingLoong_V2.5_FullBody_CAD
           path: |
             dist/QingLoong_V2.5_FullBody_CAD.glb
-            dist/QingLoong_V2.5_FullBody_CAD_Web.glb
             dist/QingLoong_V2.5_FullBody_CAD_manifest.json
-          if-no-files-found: error
           compression-level: 0
+          if-no-files-found: error
           retention-days: 30
