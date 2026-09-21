@@ -26,21 +26,48 @@ jobs:
 
       - name: Pull only the QingLoong V2.5 master STEP
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           STEP_REL="QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-Qinglong Humanoid Robot - Master Assembly.STEP"
-          git remote add upstream https://github.com/loongOpen/OpenLoong-Hardware.git || true
-          # Fetch the upstream main ref first, then fetch only the required LFS object.
-          git fetch --depth=1 upstream main:refs/remotes/upstream/main
-          git lfs fetch upstream refs/remotes/upstream/main --include="$STEP_REL" --exclude=""
-          git lfs checkout "$STEP_REL"
+
+          echo "Pointer before download:"
+          cat "$STEP_REL"
+          OID=$(awk '/^oid sha256:/{sub("sha256:","",$2); print $2}' "$STEP_REL")
+          SIZE=$(awk '/^size /{print $2}' "$STEP_REL")
+          echo "OID=$OID SIZE=$SIZE"
+
+          cat > /tmp/lfs_req.json <<JSON
+          {"operation":"download","transfers":["basic"],"objects":[{"oid":"$OID","size":$SIZE}]}
+          JSON
+
+          curl -fLsS             -u "$GITHUB_ACTOR:$GH_TOKEN"             -H "Accept: application/vnd.git-lfs+json"             -H "Content-Type: application/vnd.git-lfs+json"             --data-binary @/tmp/lfs_req.json             "https://github.com/loongOpen/OpenLoong-Hardware.git/info/lfs/objects/batch"             -o /tmp/lfs_resp.json
+
+          cat /tmp/lfs_resp.json | head -c 3000
+          echo
+
+          HREF=$(python3 - <<'PY'
+          import json
+          d=json.load(open("/tmp/lfs_resp.json"))
+          o=d["objects"][0]
+          if "error" in o:
+              raise SystemExit("LFS server error: "+str(o["error"]))
+          print(o["actions"]["download"]["href"])
+          PY
+          )
+
+          echo "Downloading 1.32 GB master STEP from upstream LFS..."
+          curl -fL --retry 5 --retry-delay 3 "$HREF" -o "$STEP_REL"
           ls -lh "$STEP_REL"
+
           python3 - <<'PY'
           import os
           p="QingLoong V2.5/en/QingLoong V2.5 - 3D File/TA00-Assemblies of Modules - 3D File/TA00-Qinglong Humanoid Robot - Master Assembly.STEP"
           s=os.path.getsize(p)
           print("STEP bytes:", s)
-          if s < 100_000_000:
-              raise SystemExit("Master STEP is still an LFS pointer or incomplete.")
+          if s < 1_000_000_000:
+              raise SystemExit("Master STEP download is incomplete.")
           PY
 
       - name: Set up Python
