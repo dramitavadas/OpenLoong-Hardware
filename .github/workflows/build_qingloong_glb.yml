@@ -1,0 +1,233 @@
+name: Build QingLoong V2.5 FullBody GLB
+
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths:
+      - ".github/workflows/build_qingloong_glb.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Checkout QingLoong V2.5 URDF mesh source
+        uses: actions/checkout@v4
+        with:
+          repository: Kscii/h5_tf_exporter
+          ref: f4f680023ca6fbe33a3a644a302d7229a8fae785
+          path: h5_tf_exporter
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install converter dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "trimesh>=4.4" numpy scipy
+
+      - name: Build full-body GLB from QingLoong V2.5 URDF + official meshes
+        shell: bash
+        run: |
+          cat > /tmp/build_qingloong_glb.py <<'PY'
+          import os, json, math, xml.etree.ElementTree as ET
+          import numpy as np
+          import trimesh
+
+          ROOT = os.path.join(
+              os.getcwd(),
+              "h5_tf_exporter",
+              "packages",
+              "hpc_data_common_end",
+              "src",
+              "hpc_data_common_end",
+              "resources",
+              "QINGLOONGV2.5",
+          )
+          URDF = os.path.join(ROOT, "QINGLOONGV2.5_v1.urdf")
+          OUT_DIR = os.path.join(os.getcwd(), "dist")
+          os.makedirs(OUT_DIR, exist_ok=True)
+          OUT = os.path.join(OUT_DIR, "QingLoong_V2.5_FullBody.glb")
+          MANIFEST = os.path.join(OUT_DIR, "QingLoong_V2.5_FullBody_manifest.json")
+
+          def f3(text, default=(0.0,0.0,0.0)):
+              if not text:
+                  return np.array(default, dtype=float)
+              vals = [float(v) for v in text.split()]
+              return np.array(vals[:3], dtype=float)
+
+          def origin_matrix(elem):
+              M = np.eye(4)
+              if elem is None:
+                  return M
+              xyz = f3(elem.attrib.get("xyz"))
+              rpy = f3(elem.attrib.get("rpy"))
+              r,p,y = rpy
+              cr,sr = math.cos(r), math.sin(r)
+              cp,sp = math.cos(p), math.sin(p)
+              cy,sy = math.cos(y), math.sin(y)
+              Rx=np.array([[1,0,0],[0,cr,-sr],[0,sr,cr]],dtype=float)
+              Ry=np.array([[cp,0,sp],[0,1,0],[-sp,0,cp]],dtype=float)
+              Rz=np.array([[cy,-sy,0],[sy,cy,0],[0,0,1]],dtype=float)
+              M[:3,:3] = Rz @ Ry @ Rx
+              M[:3,3] = xyz
+              return M
+
+          tree = ET.parse(URDF)
+          robot = tree.getroot()
+          links = {e.attrib["name"]: e for e in robot.findall("link")}
+
+          joints = []
+          child_names = set()
+          for j in robot.findall("joint"):
+              parent = j.find("parent").attrib["link"]
+              child = j.find("child").attrib["link"]
+              child_names.add(child)
+              joints.append({
+                  "name": j.attrib.get("name",""),
+                  "parent": parent,
+                  "child": child,
+                  "T": origin_matrix(j.find("origin")),
+              })
+
+          roots = [name for name in links if name not in child_names]
+          if not roots:
+              raise RuntimeError("No URDF root link found")
+          root_link = roots[0]
+
+          by_parent = {}
+          for j in joints:
+              by_parent.setdefault(j["parent"], []).append(j)
+
+          world = {root_link: np.eye(4)}
+          stack = [root_link]
+          while stack:
+              p = stack.pop()
+              for j in by_parent.get(p, []):
+                  world[j["child"]] = world[p] @ j["T"]
+                  stack.append(j["child"])
+
+          # URDF (x forward, y left, z up) -> glTF (x right, y up, z back)
+          R = np.array([
+              [ 0.0, -1.0, 0.0, 0.0],
+              [ 0.0,  0.0, 1.0, 0.0],
+              [-1.0,  0.0, 0.0, 0.0],
+              [ 0.0,  0.0, 0.0, 1.0],
+          ])
+
+          scene = trimesh.Scene()
+          used = []
+          missing = []
+
+          for lname, link in links.items():
+              if lname not in world:
+                  continue
+              visuals = link.findall("visual")
+              for vi, vis in enumerate(visuals):
+                  geom = vis.find("geometry")
+                  if geom is None:
+                      continue
+                  mesh_el = geom.find("mesh")
+                  if mesh_el is None:
+                      continue
+                  fn = mesh_el.attrib.get("filename")
+                  if not fn:
+                      continue
+                  # filenames are relative to QINGLOONGV2.5 root
+                  mesh_path = os.path.join(ROOT, fn.replace("/", os.sep))
+                  if not os.path.exists(mesh_path):
+                      missing.append(fn)
+                      continue
+
+                  loaded = trimesh.load(mesh_path, force="mesh", process=False)
+                  if isinstance(loaded, trimesh.Scene):
+                      parts = list(loaded.geometry.values())
+                      if not parts:
+                          continue
+                      mesh = trimesh.util.concatenate(parts)
+                  else:
+                      mesh = loaded
+
+                  scale_text = mesh_el.attrib.get("scale")
+                  if scale_text:
+                      s = f3(scale_text, default=(1.0,1.0,1.0))
+                      S = np.diag([s[0],s[1],s[2],1.0])
+                  else:
+                      S = np.eye(4)
+
+                  V = origin_matrix(vis.find("origin")) @ S
+                  T = R @ world[lname] @ V
+
+                  color = np.array([0.72,0.74,0.76,1.0])
+                  mat = vis.find("material")
+                  if mat is not None:
+                      col = mat.find("color")
+                      if col is not None and col.attrib.get("rgba"):
+                          vals = [float(v) for v in col.attrib["rgba"].split()]
+                          if len(vals) >= 4:
+                              color = np.clip(np.array(vals[:4]), 0.0, 1.0)
+                  rgba8 = np.round(color * 255).astype(np.uint8)
+                  try:
+                      mesh.visual.face_colors = np.tile(rgba8, (len(mesh.faces), 1))
+                  except Exception:
+                      pass
+
+                  node_name = lname if vi == 0 else f"{lname}_visual_{vi}"
+                  scene.add_geometry(mesh, node_name=node_name, geom_name=node_name, transform=T)
+                  used.append({"link": lname, "mesh": fn, "node": node_name})
+
+          if not scene.geometry:
+              raise RuntimeError("No geometry was loaded")
+
+          # Recenter horizontally while keeping feet on y=0 for convenient viewers.
+          bounds = scene.bounds.copy()
+          center_xz = (bounds[0] + bounds[1]) / 2.0
+          shift = np.eye(4)
+          shift[0,3] = -center_xz[0]
+          shift[2,3] = -center_xz[2]
+          shift[1,3] = -bounds[0,1]
+          scene.apply_transform(shift)
+
+          glb = scene.export(file_type="glb")
+          with open(OUT, "wb") as f:
+              f.write(glb)
+
+          bounds2 = scene.bounds
+          manifest = {
+              "name": "QingLoong_V2.5_FullBody",
+              "source_model": "QINGLOONGV2.5_v1.urdf",
+              "source_repository": "Kscii/h5_tf_exporter",
+              "source_commit": "f4f680023ca6fbe33a3a644a302d7229a8fae785",
+              "output": os.path.basename(OUT),
+              "root_link": root_link,
+              "links_in_urdf": len(links),
+              "joints_in_urdf": len(joints),
+              "visual_meshes_loaded": len(used),
+              "missing_meshes": sorted(set(missing)),
+              "bounds_m": bounds2.tolist(),
+              "extents_m": (bounds2[1]-bounds2[0]).tolist(),
+              "note": "Static zero-joint pose exported from QingLoong V2.5 URDF visual meshes; link nodes are preserved in the GLB scene."
+          }
+          with open(MANIFEST, "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2)
+
+          print(json.dumps(manifest, indent=2))
+          print(f"Wrote {OUT} ({os.path.getsize(OUT)/1024/1024:.1f} MiB)")
+          PY
+          python /tmp/build_qingloong_glb.py
+
+      - name: Upload QingLoong GLB
+        uses: actions/upload-artifact@v4
+        with:
+          name: QingLoong_V2.5_FullBody
+          path: |
+            dist/QingLoong_V2.5_FullBody.glb
+            dist/QingLoong_V2.5_FullBody_manifest.json
+          if-no-files-found: error
+          retention-days: 30
