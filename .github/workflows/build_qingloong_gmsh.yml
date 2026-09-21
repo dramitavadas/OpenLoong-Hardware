@@ -1,0 +1,102 @@
+name: Build QingLoong CAD GLB Gmsh fallback
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths: [".github/workflows/build_qingloong_gmsh.yml"]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 1, lfs: false}
+      - name: Download master STEP
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 6 -o q.zip "https://github.com/dramitavadas/OpenLoong-Hardware/releases/download/qingloong-master-step/QingLoong_Master.zip"
+          mkdir q && unzip -o q.zip -d q
+          STEP="$(find q -type f \( -iname '*.step' -o -iname '*.stp' \) | head -1)"
+          test "$(stat -c%s "$STEP")" -gt 1000000000
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - name: Install Gmsh and GLB tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglu1-mesa
+          python -m pip install --upgrade pip
+          pip install gmsh "trimesh>=4.4" "numpy<3"
+      - name: Import STEP and mesh CAD surfaces
+        run: |
+          STEP="$(find q -type f \( -iname '*.step' -o -iname '*.stp' \) | head -1)"
+          export STEP
+          mkdir -p dist
+          python - <<'PY'
+          import os, time, json, math
+          import gmsh
+          step=os.environ["STEP"]
+          stl="/tmp/QingLoong_Gmsh_CAD.stl"
+          gmsh.initialize()
+          gmsh.option.setNumber("General.Terminal", 1)
+          gmsh.model.add("QingLoong")
+          print("Importing STEP...")
+          t=time.time()
+          ents=gmsh.model.occ.importShapes(step, highestDimOnly=False)
+          gmsh.model.occ.synchronize()
+          print("imported entities",len(ents),"sec",time.time()-t)
+          b=gmsh.model.getBoundingBox(-1,-1)
+          ext=[b[3]-b[0],b[4]-b[1],b[5]-b[2]]
+          mx=max(ext)
+          print("bbox",b,"extents",ext)
+          # adapt to whether importer retained mm or converted to m
+          if mx > 100:
+              hmax=2.0
+              hmin=0.45
+          else:
+              hmax=0.002
+              hmin=0.00045
+          gmsh.option.setNumber("Mesh.MeshSizeMin",hmin)
+          gmsh.option.setNumber("Mesh.MeshSizeMax",hmax)
+          gmsh.option.setNumber("Mesh.MeshSizeFromCurvature",20)
+          gmsh.option.setNumber("Mesh.MeshSizeFromPoints",1)
+          gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary",1)
+          gmsh.option.setNumber("Mesh.Algorithm",6)
+          print("Meshing surfaces",hmin,hmax)
+          t=time.time()
+          gmsh.model.mesh.generate(2)
+          print("mesh sec",time.time()-t)
+          gmsh.write(stl)
+          gmsh.finalize()
+          print("STL bytes",os.path.getsize(stl))
+          PY
+      - name: Convert mesh to CAD GLB
+        run: |
+          python - <<'PY'
+          import os,json,numpy as np,trimesh
+          from trimesh.visual.material import PBRMaterial
+          from trimesh.visual.texture import TextureVisuals
+          src="/tmp/QingLoong_Gmsh_CAD.stl"
+          out="dist/QingLoong_V2.5_FullBody_CAD_Gmsh.glb"
+          m=trimesh.load(src,force="mesh",process=False)
+          # Normalize dimensions to metres. Expected full span around 2.2 m.
+          mx=float(max(m.extents))
+          if mx > 100:
+              m.apply_scale(0.001)
+          mat=PBRMaterial(name="QingLoong_CAD",baseColorFactor=[0.42,0.47,0.54,1],metallicFactor=0.72,roughnessFactor=0.27,doubleSided=True)
+          m.visual=TextureVisuals(material=mat)
+          R=np.array([[1,0,0,0],[0,0,1,0],[0,-1,0,0],[0,0,0,1]],float)
+          m.apply_transform(R)
+          b=m.bounds;c=(b[0]+b[1])/2
+          T=np.eye(4);T[0,3]=-c[0];T[2,3]=-c[2];T[1,3]=-b[0,1]
+          m.apply_transform(T)
+          with open(out,"wb") as f:f.write(m.export(file_type="glb"))
+          man={"source":"official 1.419 GB master STEP via Gmsh/OpenCascade","vertices":len(m.vertices),"faces":len(m.faces),"extents_m":m.extents.tolist(),"output_bytes":os.path.getsize(out)}
+          json.dump(man,open("dist/QingLoong_V2.5_FullBody_CAD_Gmsh_manifest.json","w"),indent=2)
+          print(json.dumps(man,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QingLoong_V2.5_FullBody_CAD_Gmsh
+          path: dist/*
+          compression-level: 0
+          retention-days: 30
