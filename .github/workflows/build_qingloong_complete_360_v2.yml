@@ -1,0 +1,222 @@
+name: Build QingLoong Complete 360 v2
+
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths: [".github/workflows/build_qingloong_complete_360_v2.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: false
+
+      - name: Checkout official QingLoong V2.5 URDF head meshes
+        uses: actions/checkout@v4
+        with:
+          repository: Kscii/h5_tf_exporter
+          ref: f4f680023ca6fbe33a3a644a302d7229a8fae785
+          path: h5src
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Download original CAD body GLB
+        run: |
+          curl -L --fail --retry 6 -o body.glb             "https://github.com/dramitavadas/OpenLoong-Hardware/releases/download/qingloong-cad-glb/QingLoong_V2.5_FullBody_CAD.glb"
+          ls -lh body.glb
+
+      - name: Install tools
+        run: |
+          pip install "trimesh==4.8.3" "numpy<3"
+          npm install -g @gltf-transform/cli
+
+      - name: Bake correct upright axes and attach official head at neck
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          mkdir -p dist
+          python - <<'PY'
+          import os, json, gc
+          import numpy as np
+          import trimesh
+          from trimesh.visual.material import PBRMaterial
+          from trimesh.visual.texture import TextureVisuals
+
+          BODY="body.glb"
+          ROOT="h5src/packages/hpc_data_common_end/src/hpc_data_common_end/resources/QINGLOONGV2.5"
+          YAW=os.path.join(ROOT,"meshes","Link_head_yaw.STL")
+          PITCH=os.path.join(ROOT,"meshes","Link_head_pitch.STL")
+          OUT="dist/QingLoong_V2.5_FullBody_CAD_Complete_360_v2.glb"
+          MAN="dist/QingLoong_V2.5_FullBody_CAD_Complete_360_v2_manifest.json"
+
+          print("Loading body scene...")
+          src=trimesh.load(BODY, force="scene", process=False)
+          print("source nodes:", len(src.graph.nodes_geometry), "geometries:", len(src.geometry))
+          print("source bounds:", src.bounds.tolist(), "extents:", src.extents.tolist())
+
+          # ORIGINAL CAD export mapping was:
+          #   old_x = CAD_x
+          #   old_y = CAD_z
+          #   old_z = -CAD_y
+          # QingLoong CAD uses Y as the body vertical axis, with +Y toward the feet.
+          # Desired glTF/model-viewer coordinates:
+          #   X = CAD_x
+          #   Y = -CAD_y  (head up, feet down)
+          #   Z = -CAD_z
+          # Therefore from the existing GLB:
+          #   new_x = old_x
+          #   new_y = old_z
+          #   new_z = -old_y
+          # This is a proper -90 deg X rotation, NOT the +90 deg transform used in v1.
+          AXIS=np.array([
+              [1,0,0,0],
+              [0,0,1,0],
+              [0,-1,0,0],
+              [0,0,0,1]
+          ], dtype=np.float64)
+
+          flat=trimesh.Scene()
+          count=0
+          for node in list(src.graph.nodes_geometry):
+              M, gname = src.graph.get(node)
+              m=src.geometry[gname].copy()
+              m.apply_transform(M)
+              m.apply_transform(AXIS)
+              # geometry is now baked in final upright coordinates; keep identity node transforms
+              flat.add_geometry(m, node_name=str(node), geom_name=f"BODY__{count:05d}")
+              count += 1
+              if count % 500 == 0:
+                  print("baked body nodes", count)
+
+          del src
+          gc.collect()
+
+          bb=flat.bounds.copy()
+          print("upright body bounds:", bb.tolist(), "extents:", flat.extents.tolist())
+
+          # Build official visual head from the V2.5 URDF meshes.
+          yaw=trimesh.load(YAW, force="mesh", process=False)
+          pitch=trimesh.load(PITCH, force="mesh", process=False)
+
+          # Reconstruct pitch link relative to yaw link using official URDF zero-pose joint offsets.
+          Tyaw=np.eye(4, dtype=float)
+          Tyaw[:3,3]=[0.009, 0.0, 0.4064]
+          Tpitch=np.eye(4, dtype=float)
+          Tpitch[:3,3]=[0.009, -0.0346, 0.4549]
+          yaw.apply_transform(Tyaw)
+          pitch.apply_transform(Tpitch)
+
+          # URDF axes: X forward, Y left, Z up.
+          # Final GLB axes: X right/left, Y up, Z depth.
+          # Use X_glb = -Y_urdf, Y_glb = Z_urdf, Z_glb = -X_urdf.
+          U2G=np.array([
+              [0,-1,0,0],
+              [0,0,1,0],
+              [-1,0,0,0],
+              [0,0,0,1]
+          ], dtype=float)
+          yaw.apply_transform(U2G)
+          pitch.apply_transform(U2G)
+
+          # Combine bounds only for placement.
+          htemp=trimesh.util.concatenate([yaw.copy(), pitch.copy()])
+          hb=htemp.bounds.copy()
+          hc=(hb[0]+hb[1])/2.0
+          del htemp
+          gc.collect()
+
+          # Neck attachment: top of headless CAD torso, centered horizontally/depth.
+          # The CAD body is already symmetric in X; use the body's overall depth center.
+          body_center=(bb[0]+bb[1])/2.0
+          target_bottom=bb[1,1]-0.020  # 20 mm overlap into neck hardware
+          move=np.array([
+              body_center[0]-hc[0],
+              target_bottom-hb[0,1],
+              body_center[2]-hc[2]
+          ], dtype=float)
+          H=np.eye(4); H[:3,3]=move
+          yaw.apply_transform(H)
+          pitch.apply_transform(H)
+
+          yaw.visual=TextureVisuals(material=PBRMaterial(
+              name="QingLoong_Head_Yaw",
+              baseColorFactor=[0.58,0.63,0.69,1.0],
+              metallicFactor=0.55,
+              roughnessFactor=0.28,
+              doubleSided=True))
+          pitch.visual=TextureVisuals(material=PBRMaterial(
+              name="QingLoong_Head_Pitch",
+              baseColorFactor=[0.20,0.23,0.27,1.0],
+              metallicFactor=0.45,
+              roughnessFactor=0.30,
+              doubleSided=True))
+
+          flat.add_geometry(yaw, node_name="HEAD__YAW", geom_name="HEAD__YAW")
+          flat.add_geometry(pitch, node_name="HEAD__PITCH", geom_name="HEAD__PITCH")
+
+          # Final bake of centering/grounding into vertices — no root rotation/translation left in scene.
+          fb=flat.bounds.copy()
+          fc=(fb[0]+fb[1])/2.0
+          T=np.eye(4)
+          T[0,3]=-fc[0]
+          T[2,3]=-fc[2]
+          T[1,3]=-fb[0,1]
+          for gm in flat.geometry.values():
+              gm.apply_transform(T)
+
+          final_bounds=flat.bounds.copy()
+          final_extents=flat.extents.copy()
+          print("final bounds:", final_bounds.tolist())
+          print("final extents:", final_extents.tolist())
+
+          # Sanity: humanoid must be tall in Y, wide in X, shallow in Z.
+          if not (final_extents[1] > 1.5 and final_extents[0] > 1.8 and final_extents[2] < 0.8):
+              raise RuntimeError(f"Axis sanity failed: extents={final_extents.tolist()}")
+
+          with open(OUT,"wb") as f:
+              f.write(flat.export(file_type="glb"))
+
+          manifest={
+              "source_body":"QingLoong V2.5 CAD body directly tessellated from official 1.419 GB master STEP",
+              "source_head":"official QingLoong V2.5 URDF visual head meshes Link_head_yaw.STL + Link_head_pitch.STL",
+              "fix":"v2 uses -90deg X correction; v1 used the opposite sign and inverted the humanoid",
+              "node_transforms":"all body/head transforms baked into vertex coordinates for stable model-viewer orbit",
+              "body_nodes":count,
+              "head_nodes":2,
+              "final_geometry_nodes":len(flat.geometry),
+              "final_bounds_m":final_bounds.tolist(),
+              "final_extents_m":final_extents.tolist(),
+              "output_bytes":os.path.getsize(OUT)
+          }
+          json.dump(manifest, open(MAN,"w"), indent=2)
+          print(json.dumps(manifest, indent=2))
+          PY
+          ls -lh dist/
+
+      - name: Make browser-optimized v2
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          gltf-transform simplify             dist/QingLoong_V2.5_FullBody_CAD_Complete_360_v2.glb             dist/QingLoong_V2.5_FullBody_CAD_Complete_360_Web_v2.glb             --ratio 0.22 --error 0.002
+          ls -lh dist/
+
+      - name: Publish v2 assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="qingloong-cad-complete-360"
+          gh release upload "$TAG"             dist/QingLoong_V2.5_FullBody_CAD_Complete_360_v2.glb             dist/QingLoong_V2.5_FullBody_CAD_Complete_360_Web_v2.glb             dist/QingLoong_V2.5_FullBody_CAD_Complete_360_v2_manifest.json             --clobber
