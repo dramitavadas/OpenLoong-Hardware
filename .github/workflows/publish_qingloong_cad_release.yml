@@ -1,0 +1,37 @@
+name: Publish QingLoong CAD GLB Release
+on:
+  push:
+    branches: [chatgpt-qingloong-glb]
+    paths: [".github/workflows/publish_qingloong_cad_release.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download successful CAD artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p out
+          gh run download 35561967192 -R dramitavadas/OpenLoong-Hardware -n QingLoong_V2.5_FullBody_CAD -D out
+          ls -lh out
+          test -f out/QingLoong_V2.5_FullBody_CAD.glb
+          test -f out/QingLoong_V2.5_FullBody_CAD_manifest.json
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="qingloong-cad-glb"
+          if gh release view "$TAG" -R dramitavadas/OpenLoong-Hardware >/dev/null 2>&1; then
+            echo "Release exists"
+          else
+            gh release create "$TAG" -R dramitavadas/OpenLoong-Hardware               --title "QingLoong V2.5 CAD-quality GLB"               --notes "CAD-quality GLB tessellated directly from the official 1.419 GB QingLoong V2.5 master STEP. Generated from 4,093 CAD solids with no failed solids."
+          fi
+          gh release upload "$TAG" -R dramitavadas/OpenLoong-Hardware             out/QingLoong_V2.5_FullBody_CAD.glb             out/QingLoong_V2.5_FullBody_CAD_manifest.json             --clobber
